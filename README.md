@@ -78,6 +78,10 @@ a laptop, and produces a page near 95 KB with posters inlined.
 
 - `j` and `k`, or the arrow keys, move between sections. `1`, `2` and `3` set the depth.
   `g` returns to the top. The page ignores depth keys while you type in an answer box.
+- The page uses the width it is given. From 832px up, the section rail docks beside the text
+  and the hero runs two columns (title and thesis left, outcomes and the start button
+  right); every band shares one left edge. Below that the rail drops and the text takes the
+  full width. The `column` and `bleed` identities stay narrower on purpose.
 - Depth is an attribute on the document. The same section is re-voiced in place, so
   switching moves nothing on screen.
 - Figures sit in a shared slot above the levels, so a novice sees the diagram an advanced
@@ -101,11 +105,13 @@ a laptop, and produces a page near 95 KB with posters inlined.
 
 ## Limits
 
-- The page can send a message only inside the chat preview frame, through
-  `window.hermes.send`.
-  Opened as a plain file, the ask buttons copy the question to the clipboard instead.
-- Progress does not survive in the preview frame, because that frame has an opaque origin.
-  It works when you open the page as a file.
+- The page can send a message only where the host injects `window.hermes` — the chat's
+  inline preview frame. Opened as a plain file or in the desktop's preview pane (an
+  Electron webview with no bridge), the ask buttons copy the question to the clipboard
+  instead.
+- Progress, depth and answers persist through `localStorage` under `coursewright:<slug>`
+  wherever the page has a real origin: opened as a file, and in the desktop preview pane
+  (measured). An opaque-origin frame has no storage, so there the page runs stateless.
 - Grading is split in two. The rubric check runs locally and answers at once. The
   "Ask Arden to grade it" button sends the question, the rubric and the answer into chat.
 - Exercise kind alternates by section, multiple choice then recall, so both feedback

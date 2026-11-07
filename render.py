@@ -420,7 +420,10 @@ _CSS = """
   --accent:{{accent}}; --accent2:{{accent2}}; --line:{{line}}; --ok:{{ok}}; --warn:{{warn}};
   --display:{{display}}; --text:{{text}}; --mono:{{mono}};
   --fs:{{text_size}}; --lh:{{leading}}; --track:{{display_tracking}}; --dw:{{display_weight}};
-  --motion:{{motion}}; --maxw:38rem;
+  --motion:{{motion}}; --maxw:38rem; --rail:12rem; --gap:2.25rem;
+  /* the width of a full band: nav rail + measure + page padding. Every band uses it, so the
+     cover, the depth bar, the rail and the article share one left and right edge. */
+  --shell:calc(var(--rail) + var(--gap) + var(--maxw) + 3rem);
 }
 @media (prefers-color-scheme: dark){
   :root{
@@ -445,6 +448,22 @@ a:hover{text-decoration-thickness:2px}
 
 /* one grid: every band shares .wrap so nothing lands on a different left edge */
 .wrap{max-width:var(--maxw);margin:0 auto;padding:0 1.5rem}
+/* the hero is display type, not body copy: it uses the width the pane gives it, in two
+   columns, so the space beside the title carries the outcomes and the start button instead
+   of sitting empty. The rail layout is the wide one; column/bleed stay deliberately narrow. */
+.cover>.wrap{max-width:min(var(--shell),100%);
+  display:grid;grid-template-columns:minmax(0,1fr);gap:1.8rem}
+.cover-main{min-width:0}
+/* the hero goes two-column as soon as the band is wide enough to hold both columns with
+   dignity (46rem); the rail layout is the one whose band can actually reach that width */
+@media (min-width:46rem){
+  html[data-layout="rail"] .cover>.wrap{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);
+    column-gap:var(--gap);row-gap:0;align-items:start}
+  html[data-layout="rail"] .cover-side{padding-top:1.9rem}
+  html[data-layout="rail"] .cover-side .outcomes{margin-bottom:1.5rem}
+  html[data-layout="rail"] .cover-side .cta{display:block;margin-bottom:1rem}
+  html[data-layout="rail"] .cover-side .est{display:flex;flex-direction:column;gap:.2rem;margin-top:.7rem}
+}
 
 /* cover */
 .cover{padding:clamp(3.5rem,9vw,7rem) 0 clamp(2rem,5vw,3.5rem)}
@@ -490,9 +509,20 @@ h1{font-family:var(--display);font-weight:var(--dw);font-size:clamp(2.3rem,6vw,3
 
 /* shell + rail */
 .shell{padding-bottom:6rem}
+/* the shell band is the one that has to use what the pane gives it: rail + measure, not a
+   centred column with two empty gutters (the desktop preview pane is ~837px, a phone-ish
+   width a 1180px breakpoint never reached) */
+.shell>.wrap{max-width:min(var(--shell),100%)}
+/* the depth bar belongs to the same band as the cover and the rail, not to a centred
+   column of its own */
+.levels>.wrap{max-width:min(var(--shell),100%)}
 .rail{display:none}
-@media (min-width:1180px){
-  .rail{display:block;position:fixed;top:9rem;left:max(1rem,calc(50% - 33ch - 13.5rem));width:12rem}
+@media (min-width:52rem){
+  html[data-layout="rail"] .shell>.wrap{display:grid;
+    grid-template-columns:var(--rail) minmax(0,1fr);column-gap:var(--gap);align-items:start}
+  html[data-layout="rail"] .rail{display:block;grid-column:1;grid-row:1;position:sticky;
+    top:5.2rem;max-height:calc(100vh - 6.6rem);overflow-y:auto;padding-right:.3rem}
+  html[data-layout="rail"] main{grid-column:2;grid-row:1;min-width:0;max-width:var(--maxw)}
   .rail ol{list-style:none;margin:0;padding:0;display:grid;gap:.7rem}
   .rail a{display:grid;grid-template-columns:1.6rem 1fr;gap:.1rem;text-decoration:none;
     color:color-mix(in srgb,var(--ink) 62%,var(--bg));
@@ -505,6 +535,11 @@ h1{font-family:var(--display);font-weight:var(--dw);font-size:clamp(2.3rem,6vw,3
   .rail a[aria-current="true"]{color:var(--ink);
     background-image:linear-gradient(var(--accent),var(--accent))}
   .rail a.seen .n{color:var(--ok);opacity:1}
+}
+/* below the rail breakpoint the article owns the whole band; a 900px line is worse than a
+   little slack, so it keeps a reading measure and simply starts at the page margin */
+@media (max-width:51.99rem){
+  html[data-layout="rail"] main{max-width:min(42rem,100%)}
 }
 
 /* sections */
@@ -598,8 +633,9 @@ figure.fig{margin:2rem 0}
 /* ---- layouts: the identity's third axis has to change something real ---- */
 html[data-layout="column"] .rail,
 html[data-layout="bleed"] .rail{display:none!important}
-html[data-layout="column"] .wrap{max-width:34rem}
-html[data-layout="bleed"] .wrap{max-width:42rem}
+/* no rail means the measure is the whole band */
+html[data-layout="column"]{--maxw:34rem;--rail:0rem;--gap:0rem}
+html[data-layout="bleed"]{--maxw:42rem;--rail:0rem;--gap:0rem}
 @media (min-width:1180px){
   /* bleed: figures break out of the text column while prose stays readable */
   html[data-layout="bleed"] figure.fig{margin-inline:calc(-50vw + 50% + 3rem);max-width:none}
@@ -706,6 +742,8 @@ ul.reading a{font-weight:500;text-decoration:none;border-bottom:1px solid color-
   .levels,.rail,.bar,.sec-ask,.resume,.recall-actions,.vplay,.vthumb,.ask,.track,.cta,.vposter,.prov-warnings{display:none!important}
   body{background:#fff;color:#000;font-size:11pt;max-width:none}
   .wrap{max-width:none;padding:0 .5in}
+  /* one column on paper: the hero's side column is a screen arrangement */
+  .cover>.wrap{display:block}
   /* dark surfaces become outlined boxes: a filled card either eats ink or loses its text */
   .analogy,.callout,.notice,.checkpoint,.ex,pre,code,dl.def{
     background:#fff!important;color:#000!important;border:1px solid #999!important;
@@ -817,7 +855,7 @@ _JS = """
     var seenN=Object.keys(state.seen).length;
     if(seenN){
       resume.hidden=false;
-      resume.textContent=seenN+' of '+secs.length+' sections read · depth '+state.level;
+      resume.textContent=seenN+' of '+secs.length+' sections opened · depth '+state.level;
     }
   }
   if(startBtn){
@@ -1086,23 +1124,28 @@ def render(spec: Dict[str, Any], *, mode: str = "auto") -> str:
         '<div class="bar" aria-hidden="true"><i></i></div>\n'
         f'<a class="skip" href="#{first_section}">Skip to the course</a>\n'
         '<header class="cover"><div class="wrap">\n'
+        '<div class="cover-main">\n'
         f'<p class="kicker"><span>Course</span><span>·</span><span>{html.escape(spec["language"].upper())}</span></p>\n'
         f'<h1>{_inline(spec["title"])}</h1>\n'
         + (f'<p class="sub">{_inline(spec["subtitle"])}</p>\n' if spec["subtitle"] else "")
         + (f'<p class="thesis">{_inline(spec["thesis"])}</p>\n' if spec["thesis"] else "")
+        + _notice(spec)
+        + '</div>\n<div class="cover-side">\n'
         + (f'<ul class="outcomes">{outcomes}</ul>\n' if outcomes else "")
         + f'<div class="cta"><button class="btn primary" type="button" id="start">Start reading</button>'
-        + f'<span class="est">{len(spec["sections"])} sections · ~{minutes} min · starts at {spec["default_level"]}</span></div>\n'
+        + f'<span class="est"><span>{len(spec["sections"])} sections · ~{minutes} min</span>'
+        + f'<span>opens at {spec["default_level"]}</span></span></div>\n'
         + '<div class="resume" id="resume" hidden></div>\n'
-        + _notice(spec)
-        + "</div></header>\n"
+        + "</div>\n</div></header>\n"
         + '<div class="levels"><div class="wrap"><span class="lab">Depth</span>'
         + f'<div class="seg" role="group" aria-label="Level of depth">{seg}</div>'
         + '<span class="spacer"></span>'
         + '<span class="pctwrap"><span class="track"><i id="trackfill"></i></span>'
         + '<span class="pct" id="pctlab">0% read</span></span></div></div>\n'
-        + (f'<nav class="rail" aria-label="Sections"><ol>{rail_items}</ol></nav>\n' if rail_items else "")
-        + f'<div class="shell"><div class="wrap"><main>{sections}{_resources(spec)}{ask}</main></div></div>\n'
+        + (f'<div class="shell"><div class="wrap">'
+           + (f'<nav class="rail" aria-label="Sections"><ol>{rail_items}</ol></nav>'
+              if rail_items else "")
+           + f'<main>{sections}{_resources(spec)}{ask}</main></div></div>\n')
         + _provenance_footer(spec, identity)
         + f"<script>{_JS}</script>\n</body>\n</html>\n"
     )
