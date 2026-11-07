@@ -1,0 +1,47 @@
+name: coursewright
+version: 0.1.0
+manifest_version: 2
+license: MIT
+description: >-
+  Generates a self-contained, interactive HTML course on any subject at three
+  levels of depth (novice, intermediate, advanced) with an in-place level
+  toggle, worked visuals, exercises, curated videos and reading, and a
+  provenance footer that says what was actually researched.
+author: Nehuen
+tags: [learning, study, courses, html, education]
+provides_tools:
+  - coursewright_plan
+  - coursewright_build
+  - coursewright_list
+  - coursewright_status
+provides_hooks: []
+requires_env: []
+config_schema:
+  default_level:
+    type: str
+    choices: [novice, intermediate, advanced]
+    default: intermediate
+    label: Default level
+    description: Which depth the course opens at.
+  courses_dir:
+    type: str
+    default: "~/Courses"
+    label: Visible course folder
+    description: A copy of every built course is written here. Empty disables the copy.
+  enable_videos:
+    type: bool
+    default: true
+    label: Include video resources
+  enable_research:
+    type: bool
+    default: true
+    label: Research the topic
+    description: Search and read real sources before writing, and list what was used.
+  max_videos:
+    type: int
+    default: 6
+    label: Maximum videos per course
+  max_sources:
+    type: int
+    default: 12
+    label: Maximum sources read per course

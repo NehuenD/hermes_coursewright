@@ -1,0 +1,46 @@
+# Catalog entry for the Hermes plugin catalog. Not submitted yet.
+# Shape mirrors ~/.hermes/hermes-agent/plugin-catalog/*.yaml.
+name: coursewright
+repo: https://github.com/NehuenD/hermes_coursewright
+sha: ""
+title: Coursewright
+description: >-
+  Turns a topic into one self-contained HTML course at three depths, novice, intermediate
+  and advanced, switched in place without a reload. It researches before it writes: it
+  searches through whatever web backend the host has configured, reads the pages it finds,
+  collects videos that carry captions, and lists every source, dead end and filtered result
+  in a footer. The model never writes HTML. It fills a validated spec and a renderer draws
+  the page, so a course looks designed rather than prompted. Exercises alternate between
+  multiple choice with instant local feedback and free recall with a rubric check that can
+  escalate to the agent for a grade. Depth, progress and answers persist per course. It
+  needs no API keys: when search returns nothing it falls back to Wikipedia, arXiv and
+  Stack Exchange, and a course with no sources says so on its own page.
+maintainer: NehuenD
+tier: community
+category: learning
+version: "0.1.0"
+license: MIT
+docs_url: https://github.com/NehuenD/hermes_coursewright#readme
+platforms: []
+capabilities:
+  provides_tools:
+    - coursewright_plan
+    - coursewright_build
+    - coursewright_list
+    - coursewright_status
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
+  provides_commands:
+    - course
+    - courses
+tags:
+  - learning
+  - courses
+  - research
+  - citations
+  - html
+notes: >-
+  Uses the host's web tools, web_search and web_extract, plus yt-dlp. Owns no credentials
+  and no network keys. Writes courses under its plugin data directory and mirrors them to
+  ~/Courses for easy opening.

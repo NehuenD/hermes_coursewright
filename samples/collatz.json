@@ -1,0 +1,686 @@
+{
+  "version": 1,
+  "slug": "collatz-conjecture",
+  "language": "en",
+  "title": "The 3n + 1 Problem",
+  "subtitle": "A rule a child can follow, a question nobody can answer",
+  "thesis": "One line of arithmetic generates behaviour that outruns every tool we have for proving things about it.",
+  "outcomes": [
+    "Follow the map by hand and read a trajectory",
+    "Explain why parity, not algebra, is the wall",
+    "State precisely what has been proved — and what has not",
+    "Recognise a crank proof when you see one"
+  ],
+  "default_level": "intermediate",
+  "identity": {
+    "palette": "ink-copper",
+    "type_pairing": "editorial-serif",
+    "layout": "rail",
+    "motion": "restrained",
+    "rationale": "hand-worked arithmetic reads best warm, quiet and generously spaced"
+  },
+  "provenance": {
+    "researched": false,
+    "finders": [
+      "yt-dlp (video search)"
+    ],
+    "readers": [],
+    "sources": [],
+    "failures": [],
+    "warnings": [
+      "M0 build: no source-reading pass ran, so every claim here is model knowledge. Sources and timestamps arrive with the research milestone."
+    ]
+  },
+  "sections": [
+    {
+      "id": "s1",
+      "eyebrow": "The rule",
+      "title": "A game with two moves",
+      "hook": "You can learn the whole problem in twenty seconds and spend a lifetime on it.",
+      "visual": null,
+      "levels": {
+        "novice": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Pick a whole number. If it is **even**, cut it in half. If it is **odd**, triple it and add one. Now do it again with the number you got. And again."
+            },
+            {
+              "kind": "analogy",
+              "term": "Think of it as",
+              "md": "A game with exactly two moves, decided by one question: *odd or even?* You never choose. The number chooses."
+            },
+            {
+              "kind": "prose",
+              "md": "Start with 6: it halves to 3, then 3 becomes 10, 10 halves to 5, 5 becomes 16, 16 halves to 8, 8 to 4, 4 to 2, 2 to 1. Eight moves to reach 1.\n\nNow the question that breaks mathematics: does **every** starting number eventually reach 1?"
+            }
+          ]
+        },
+        "intermediate": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Define a function on the positive integers: **T(n) = n/2** when n is even, and **T(n) = 3n + 1** when n is odd. The sequence *n, T(n), T²(n), …* is the **trajectory** of n. The Collatz conjecture says every trajectory reaches 1."
+            },
+            {
+              "kind": "definition",
+              "term": "Total stopping time",
+              "md": "The number of steps σ(n) needed to first reach 1. σ(6) = 8, σ(1) = 0. If a trajectory never reaches 1, σ(n) is undefined — and that is exactly the case the conjecture forbids."
+            },
+            {
+              "kind": "code",
+              "lang": "python",
+              "code": "def trajectory(n):\n    seq = [n]\n    while n != 1:\n        n = 3 * n + 1 if n % 2 else n // 2\n        seq.append(n)\n    return seq"
+            }
+          ]
+        },
+        "advanced": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Write the map on ℕ⁺ as a single expression using the parity indicator: **T(n) = (3n + 1)·[n odd] + (n/2)·[n even]**. Nothing about it is exotic — it is a piecewise-linear map with two branches, integer coefficients, and no free parameters."
+            },
+            {
+              "kind": "math",
+              "md": "T(n) = (3n + 1)/2 when n ≡ 1 (mod 2),  n/2 when n ≡ 0 (mod 2)"
+            },
+            {
+              "kind": "prose",
+              "md": "Most of the literature uses the **accelerated** form, which folds the forced halving that follows an odd step into the same move: T'(n) = (3n + 1)/2 for odd n, n/2 for even n. Trajectories agree up to reindexing; stopping times differ by a bounded amount. That the map is cheap to state and cheap to compute is the whole trap — it looks like something a proof should fall out of."
+            }
+          ]
+        }
+      },
+      "exercise": {
+        "kind": "mcq",
+        "prompt": "You start at 7. What is the next term?",
+        "choices": [
+          "21",
+          "22",
+          "20",
+          "23"
+        ],
+        "answer": 1,
+        "why": "7 is odd, so the odd branch applies: 3 × 7 + 1 = 22. (Twenty-one is 3 × 7 — the step everyone forgets to finish.)"
+      }
+    },
+    {
+      "id": "s2",
+      "eyebrow": "The shape of a trajectory",
+      "title": "Hailstones",
+      "hook": "Numbers that climb before they fall, and one small number that refuses to behave.",
+      "levels": {
+        "novice": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Watch a number climb instead of fall. Start at 27 and it goes up to 82, then 41, then 124… and keeps bouncing for a hundred steps before it finally lands on 1. Up and down like a hailstone in a storm — that is what people called these sequences."
+            },
+            {
+              "kind": "prose",
+              "md": "27 is the famous one because it is so small and takes so long: **111 steps**, and on the way it reaches **9,232** — more than three hundred times where it started."
+            }
+          ]
+        },
+        "intermediate": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Trajectories are not monotone and they are not random either. σ(n) grows slowly and very irregularly: σ(27) = 111, while σ(97) = 118 and σ(871) = 178. Records keep getting broken at unpredictable values, which is one reason statistical arguments are so hard to make rigorous."
+            },
+            {
+              "kind": "figure",
+              "caption": "The trajectory of 27 on a logarithmic vertical axis: 111 steps, peaking at 9,232. The sawtooth is the parity of the current number — odd steps jump, even steps fall.",
+              "spec": {
+                "type": "trajectory",
+                "n": 27
+              }
+            },
+            {
+              "kind": "checkpoint",
+              "md": "You should now be able to say what a trajectory is, what σ(n) counts, and why a small starting value can produce a long one."
+            }
+          ]
+        },
+        "advanced": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Model a trajectory by its **parity vector** — the sequence of odd/even decisions along the way. Under a uniform-random model of that vector, the multiplier after k odd and 2k even steps is 3^k / 2^{2k} = (3/4)^k, which decays geometrically. So the heuristic expectation is drift toward 0, plus rare enormous excursions — exactly the hailstone picture."
+            },
+            {
+              "kind": "math",
+              "md": "E[log T(n)] ≈ (1/2)log 3 − log 2 < 0"
+            },
+            {
+              "kind": "prose",
+              "md": "The gap between that expectation and a theorem is the entire problem: the parity decisions are not independent, and no known technique converts a heuristic drift into a statement about every integer."
+            }
+          ]
+        }
+      },
+      "exercise": {
+        "kind": "recall",
+        "prompt": "In your own words: why is 27 the example everyone uses?",
+        "rubric": [
+          "small",
+          "111",
+          "9232",
+          "climb",
+          "long",
+          "record"
+        ],
+        "answer": "Because it is a small starting value with an unusually long and high trajectory: 111 steps, rising to 9,232 before collapsing to 1. It is the cheapest possible counterexample to the intuition that small numbers behave modestly."
+      }
+    },
+    {
+      "id": "s3",
+      "eyebrow": "The wall",
+      "title": "Parity eats algebra",
+      "hook": "The one question the rule asks is the one question algebra cannot see.",
+      "levels": {
+        "novice": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Here is the difficulty in one sentence: the rule asks *is it odd or even?*, and that question has no clean answer in the language we use for equations."
+            },
+            {
+              "kind": "analogy",
+              "term": "Think of it as",
+              "md": "A recipe that says \"if the egg is fresh, do this; otherwise do that\". Perfectly clear instructions — but if all you have is a shopping list, the freshness test is invisible."
+            }
+          ]
+        },
+        "intermediate": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Algebraic arguments want a quantity that always grows, always shrinks, or stays fixed. The Collatz map has none: it multiplies by 3 and adds 1 on half its inputs and divides by 2 on the other half, and which branch you take depends on a property (parity) that is not preserved under the operations involved."
+            },
+            {
+              "kind": "prose",
+              "md": "There is no known invariant, no known monotone, and no known embedding into a dynamical system where the question becomes easy. Every \"proof\" that circulates fails at exactly this point."
+            }
+          ]
+        },
+        "advanced": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "The first k parity decisions determine n modulo 2^k, and that determines everything up to an affine map: after k steps, **T^k(n) = (3^a n + b) / 2^c**, where a is the number of odd steps, c the number of even steps, and b depends on the order of decisions. That is Terras' starting point — the parity vector of length k is a function of n mod 2^k and nothing else."
+            },
+            {
+              "kind": "math",
+              "md": "T^k(n) = (3^a n + b(n)) / 2^c,  with a + c = k"
+            },
+            {
+              "kind": "aside",
+              "md": "This is also why the problem has a natural 2-adic formulation (Lagarias' conjugacy of T to the shift on ℤ₂): the parity sequence is the base-2 expansion, and the map becomes a shift. It gives a clean dynamical picture without giving a proof."
+            }
+          ]
+        }
+      },
+      "exercise": {
+        "kind": "mcq",
+        "prompt": "The parity vector of length k is determined by which quantity?",
+        "choices": [
+          "n modulo 2^k",
+          "n exactly",
+          "the full trajectory of n",
+          "the value of 3n + 1"
+        ],
+        "answer": 0,
+        "why": "Only n mod 2^k matters for the first k decisions — the rest of n is invisible until later. That is the precise sense in which parity is a 2-adic, not an algebraic, obstruction."
+      }
+    },
+    {
+      "id": "s4",
+      "eyebrow": "The state of the art",
+      "title": "What is actually proved",
+      "hook": "Almost everything works. That is not the same as everything.",
+      "levels": {
+        "novice": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "We know a lot. Every starting number anyone has ever checked — all of them up to about **295 quintillion** — reaches 1. We also know that if you pick a number at random, the chance it fails is zero in a precise sense."
+            },
+            {
+              "kind": "prose",
+              "md": "What we do not know is whether there is one number, somewhere out there, that never lands."
+            }
+          ]
+        },
+        "intermediate": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "The results cluster into three kinds. **Density results:** Terras (1976) proved that the set of n with finite stopping time has density 1. **Explicit bounds:** Krasikov and Lagarias and successors bound how many n below x can have unusually long trajectories. **Exhaustive verification:** every n < 2^68 has been checked (Barina, 2020)."
+            },
+            {
+              "kind": "prose",
+              "md": "Then Tao (2019): *almost all* orbits attain *almost bounded* values — a statement about density, not about every integer. It is the strongest result of its kind and it still does not say \"all\"."
+            },
+            {
+              "kind": "callout",
+              "tone": "honesty",
+              "title": "The word doing all the work",
+              "md": "\"Almost all\" means the exceptions form a set of density zero. Density zero is not empty: the perfect squares have density zero, and there are infinitely many of them. Any argument that slides from *almost all* to *all* is not a proof, and it is the most common error in amateur attempts."
+            }
+          ]
+        },
+        "advanced": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Precisely: Terras showed that the set of n whose trajectory reaches a value below n (finite *stopping time*, not total stopping time) has natural density 1. Tao proved that for any function f tending to infinity, the set of n whose orbit attains a value below f(n) has density 1. Neither statement excludes an exceptional set of density zero, and the conjecture is exactly the claim that this exceptional set is empty."
+            },
+            {
+              "kind": "math",
+              "md": "∀ε>0:  #{n ≤ x : σ(n) = ∞} = o(x)  ⇏  #{n : σ(n) = ∞} = 0"
+            }
+          ]
+        }
+      },
+      "exercise": {
+        "kind": "mcq",
+        "prompt": "\"Almost all integers reach 1\" — what does that assert?",
+        "choices": [
+          "Every integer reaches 1",
+          "All but a set of density zero reach 1",
+          "Infinitely many reach 1",
+          "The first 2^68 reach 1"
+        ],
+        "answer": 1,
+        "why": "Density one is a statement about proportions below x as x grows, not about membership. An infinite exceptional set of density zero is perfectly compatible with it."
+      }
+    },
+    {
+      "id": "s5",
+      "eyebrow": "The other half",
+      "title": "Cycles",
+      "hook": "A trajectory can fail in two ways, and one of them is much better studied.",
+      "levels": {
+        "novice": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "There are two ways to never reach 1: fly off to infinity, or go round in a loop. Loops are easier to rule out, and people have ruled out all the small ones — but not all of them."
+            }
+          ]
+        },
+        "intermediate": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "The trivial loop 1 → 4 → 2 → 1 is the only cycle anyone has found. Every other cycle has been excluded up to enormous lengths — Eliahou's 1993 argument rules out cycles shorter than about seventeen million steps — by turning the existence of a cycle into a Diophantine equation and bounding its solutions."
+            },
+            {
+              "kind": "comparison",
+              "left": "Divergence",
+              "right": "Cycle",
+              "items": [
+                "Trajectory grows without bound",
+                "Trajectory returns to a value",
+                "No known non-trivial example",
+                "One trivial example (1-4-2)",
+                "Heuristic arguments suggest none",
+                "Same equation, different question",
+                "Almost no general technique",
+                "Continued fractions and Diophantine bounds apply"
+              ]
+            },
+            {
+              "kind": "math",
+              "md": "n(2^c − 3^a) = b  where a = #odd steps, c = #even steps, b > 0"
+            },
+            {
+              "kind": "prose",
+              "md": "A cycle with a odd and c even steps returns to its start, so n·2^c = 3^a·n + b, i.e. n = b/(2^c − 3^a). Since 2^c and 3^a are never equal for positive a, c, the denominator is nonzero — and the whole question becomes how well 3^a/2^c can approximate 1 while keeping b small. That is a Diophantine approximation problem, and it is where the real bounds come from."
+            }
+          ]
+        },
+        "advanced": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "For a putative cycle, the linear relation above forces 2^c − 3^a to divide b, with b determined by the pattern of parity decisions. Eliahou (1993) combined this with continued-fraction convergents of log₂3 to exclude cycle lengths below 17,087,915; later work extended the range. These arguments are rigorous but conditional on the cycle's shape — they say nothing about divergence."
+            },
+            {
+              "kind": "timeline",
+              "items": [
+                "1937 — Collatz circulates the problem",
+                "1976 — Terras: density-one finite stopping time",
+                "1993 — Eliahou: no short cycles",
+                "2019 — Tao: almost bounded values for almost all orbits",
+                "2020 — exhaustive verification to 2^68",
+                "Today — still open"
+              ]
+            }
+          ]
+        }
+      },
+      "exercise": {
+        "kind": "mcq",
+        "prompt": "A cycle with a odd and c even steps must satisfy which relation?",
+        "choices": [
+          "n(2^c − 3^a) = b",
+          "3^a = 2^c exactly",
+          "n = 2^c + 3^a",
+          "b = 0 always"
+        ],
+        "answer": 0,
+        "why": "Returning to the start means n·2^c = 3^a·n + b. Rearranged: n(2^c − 3^a) = b. Since 3^a ≠ 2^c, the term in brackets is nonzero — which is what makes the problem Diophantine rather than impossible."
+      }
+    },
+    {
+      "id": "s6",
+      "eyebrow": "Thinking like a researcher",
+      "title": "Why the heuristic is not a proof",
+      "hook": "The random-walk argument is convincing, correct in spirit, and completely insufficient.",
+      "levels": {
+        "novice": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "If you pretend each step is a coin flip, the numbers drift downward, so everything should land. That reasoning is why nobody expects a counterexample. It is also not a proof — pretending is not proving."
+            },
+            {
+              "kind": "steps",
+              "items": [
+                "Assume the odd/even pattern behaves like fair coin flips",
+                "Compute the average multiplicative drift — it is downward",
+                "Conclude that trajectories should almost surely fall to 1",
+                "Notice the conclusion is about *typical* numbers, not *every* number",
+                "Notice the assumption was never justified"
+              ]
+            }
+          ]
+        },
+        "intermediate": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "The flaw is not the arithmetic, it is the independence. Parity decisions in a Collatz trajectory are strongly correlated: after an odd step the next value is even by construction, so decisions cannot be treated as independent coin flips. Every attempt to make the heuristic rigorous runs into this."
+            },
+            {
+              "kind": "prose",
+              "md": "What would count as progress? A proof that no divergent orbit exists. A proof that no non-trivial cycle exists. A new invariant that constrains all orbits. Or a technique that converts density statements into membership statements — the last one would be a major result in its own right, well beyond this problem."
+            },
+            {
+              "kind": "figure",
+              "caption": "Total stopping times for n = 1…60. Spiky, unsmooth, and full of local records — the visual reason why \"it grows slowly on average\" is not a statement you can prove by looking.",
+              "spec": {
+                "type": "bars",
+                "points": [
+                  {
+                    "label": "1",
+                    "value": 0
+                  },
+                  {
+                    "label": "2",
+                    "value": 1
+                  },
+                  {
+                    "label": "3",
+                    "value": 7
+                  },
+                  {
+                    "label": "4",
+                    "value": 2
+                  },
+                  {
+                    "label": "5",
+                    "value": 5
+                  },
+                  {
+                    "label": "6",
+                    "value": 8
+                  },
+                  {
+                    "label": "7",
+                    "value": 16
+                  },
+                  {
+                    "label": "8",
+                    "value": 3
+                  },
+                  {
+                    "label": "9",
+                    "value": 19
+                  },
+                  {
+                    "label": "10",
+                    "value": 6
+                  },
+                  {
+                    "label": "11",
+                    "value": 14
+                  },
+                  {
+                    "label": "12",
+                    "value": 9
+                  },
+                  {
+                    "label": "13",
+                    "value": 9
+                  },
+                  {
+                    "label": "14",
+                    "value": 17
+                  },
+                  {
+                    "label": "15",
+                    "value": 17
+                  },
+                  {
+                    "label": "16",
+                    "value": 4
+                  },
+                  {
+                    "label": "17",
+                    "value": 12
+                  },
+                  {
+                    "label": "18",
+                    "value": 20
+                  },
+                  {
+                    "label": "19",
+                    "value": 20
+                  },
+                  {
+                    "label": "20",
+                    "value": 7
+                  },
+                  {
+                    "label": "21",
+                    "value": 7
+                  },
+                  {
+                    "label": "22",
+                    "value": 15
+                  },
+                  {
+                    "label": "23",
+                    "value": 15
+                  },
+                  {
+                    "label": "24",
+                    "value": 10
+                  },
+                  {
+                    "label": "25",
+                    "value": 23
+                  },
+                  {
+                    "label": "26",
+                    "value": 10
+                  },
+                  {
+                    "label": "27",
+                    "value": 111
+                  },
+                  {
+                    "label": "28",
+                    "value": 18
+                  },
+                  {
+                    "label": "29",
+                    "value": 18
+                  },
+                  {
+                    "label": "30",
+                    "value": 18
+                  },
+                  {
+                    "label": "31",
+                    "value": 106
+                  },
+                  {
+                    "label": "32",
+                    "value": 5
+                  },
+                  {
+                    "label": "33",
+                    "value": 26
+                  },
+                  {
+                    "label": "34",
+                    "value": 13
+                  },
+                  {
+                    "label": "35",
+                    "value": 13
+                  },
+                  {
+                    "label": "36",
+                    "value": 21
+                  },
+                  {
+                    "label": "37",
+                    "value": 21
+                  },
+                  {
+                    "label": "38",
+                    "value": 21
+                  },
+                  {
+                    "label": "39",
+                    "value": 34
+                  },
+                  {
+                    "label": "40",
+                    "value": 8
+                  }
+                ],
+                "xlabel": "n",
+                "ylabel": "steps to reach 1"
+              }
+            }
+          ]
+        },
+        "advanced": {
+          "blocks": [
+            {
+              "kind": "prose",
+              "md": "Formally, the heuristic model assigns a probability space of parity sequences and shows the resulting random variable is finite almost surely. A proof of the conjecture would require the actual deterministic orbit to realise a set of sequences that the model calls generic — and there is no known way to establish that an individual integer's parity vector is generic in the required sense, nor any ergodic theorem that applies to the map on ℕ⁺ with counting measure."
+            },
+            {
+              "kind": "callout",
+              "tone": "insight",
+              "title": "How to tell a crank proof in thirty seconds",
+              "md": "It proves something strictly stronger than anyone else could (all orbits, all cycles, and usually Goldbach too). It never uses the fact that 3^a and 2^c are multiplicatively independent. It treats the parity sequence as random. And it never states where the density-zero exceptional set went."
+            }
+          ]
+        }
+      },
+      "exercise": {
+        "kind": "recall",
+        "prompt": "What exactly is missing between the random-walk heuristic and a proof?",
+        "rubric": [
+          "independent",
+          "correlation",
+          "parity",
+          "almost all",
+          "every",
+          "deterministic",
+          "measure",
+          "exceptional"
+        ],
+        "answer": "The heuristic assumes the odd/even decisions are independent coin flips and concludes something about typical orbits. A proof needs the actual orbit of every integer to be typical — but parity decisions are correlated by construction, the counting measure is not ergodic for this map, and a density statement never excludes a density-zero exceptional set."
+      }
+    }
+  ],
+  "resources": {
+    "videos": [
+      {
+        "id": "094y1Z2wpJg",
+        "title": "The Simplest Math Problem No One Can Solve",
+        "channel": "Veritasium",
+        "duration": 1329,
+        "why": "The best visual intuition for the map and why it is hard — start here.",
+        "transcript": true,
+        "thumb": "none",
+        "level": "novice"
+      },
+      {
+        "id": "5mFpVDpKX70",
+        "title": "UNCRACKABLE? The Collatz Conjecture",
+        "channel": "Numberphile",
+        "duration": 472,
+        "why": "Faster, more concrete, works through trajectories by hand.",
+        "transcript": true,
+        "thumb": "none",
+        "level": "intermediate"
+      },
+      {
+        "id": "vT4VJyXWHlo",
+        "title": "The surprisingly hard math problem — Terence Tao",
+        "channel": "Lex Clips",
+        "duration": 452,
+        "why": "A working mathematician on why partial results are the real story.",
+        "transcript": true,
+        "thumb": "none",
+        "level": "advanced"
+      }
+    ],
+    "reading": [
+      {
+        "title": "Collatz conjecture — Wikipedia",
+        "href": "https://en.wikipedia.org/wiki/Collatz_conjecture",
+        "kind": "article",
+        "why": "The best starting map of the literature, with the standard references.",
+        "level": "novice"
+      },
+      {
+        "title": "The 3x+1 problem: An annotated bibliography",
+        "href": "https://arxiv.org/abs/math/0309224",
+        "kind": "paper",
+        "venue": "Lagarias, arXiv",
+        "year": 2003,
+        "why": "Every serious thread, annotated by the person who knows them all.",
+        "level": "intermediate"
+      },
+      {
+        "title": "Almost all orbits of the Collatz map attain almost bounded values",
+        "href": "https://arxiv.org/abs/1909.03562",
+        "kind": "paper",
+        "venue": "Tao, arXiv",
+        "year": 2019,
+        "why": "The strongest modern result, and a masterclass in what \"almost all\" buys you.",
+        "level": "advanced"
+      },
+      {
+        "title": "The Ultimate Challenge: The 3x+1 Problem",
+        "href": "",
+        "kind": "book",
+        "venue": "Lagarias (ed.), AMS",
+        "year": 2010,
+        "why": "The collected state of the art in one volume, including the survey everyone cites.",
+        "level": "advanced"
+      }
+    ]
+  }
+}
