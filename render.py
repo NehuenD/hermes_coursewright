@@ -901,7 +901,7 @@ _JS = """
     var stitle=h2?h2.textContent.trim().slice(0,44):'';
     var lvl=document.documentElement.getAttribute('data-level')||'intermediate';
     var fb=ex.querySelector('.feedback');
-    var rubric=((fb&&fb.getAttribute('data-rubric'))||'').replace(/\|/g,', ');
+    var rubric=((fb&&fb.getAttribute('data-rubric'))||'').replace(/[|]/g,', ');
     var q='Coursewright grade — course "'+slug+'", section '+sid+' ("'+stitle+'", level '+lvl+
       '). Question: '+(ex.querySelector('.ex-prompt').textContent||'').trim().replace(/[.?!]+$/,'').slice(0,110)+
       '. Rubric keywords: '+rubric.slice(0,80)+
