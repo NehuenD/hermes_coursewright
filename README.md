@@ -32,8 +32,13 @@ coursewright_status()                                  last build, ok or failed
 /courses [slug]
 ```
 
+`/course` returns at once and builds in the background. When the course is ready it is
+posted into the session as a message, with the path and a preview. `/courses` lists what
+exists and says when a build is still running. The tools are synchronous, so a build called
+by the agent blocks that tool call for the few minutes it takes.
+
 Each build writes `$HERMES_HOME/plugin-data/coursewright/courses/<slug>/index.html` and a
-copy in `~/Courses/<slug>/`. The build writes the spec and the research record next to the page.
+copy in `~/Courses/<slug>/`, with the spec and the research record beside the page.
 
 ## How a course gets written
 
@@ -107,6 +112,10 @@ a laptop, and produces a page near 95 KB with posters inlined.
   paths exist in every course.
 - The plugin detects video transcripts and reports them, and does not quote them at a
   timestamp yet.
+- A slash command has a 30 second budget in the desktop client, so `/course` starts a
+  background build instead of blocking. The result arrives as a posted message, and
+  `/courses` shows it either way. A short lived `-q` session can close before the post
+  lands, so use `/courses` there.
 - A running gateway holds the plugin modules and tool schemas it loaded. After changing the
   code, start a new session or restart the gateway.
 

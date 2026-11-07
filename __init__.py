@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +33,10 @@ logger = logging.getLogger(__name__)
 _PLUGIN_DIR = Path(__file__).parent
 _SAMPLES = _PLUGIN_DIR / "samples"
 _MAX_SECTIONS_BUILT = 7
+
+# Slash commands get 30 s; a build takes minutes. Builds run on worker threads, one per topic.
+_BUILD_LOCK = threading.Lock()
+_ACTIVE: dict = {}
 
 PLAN_SCHEMA = {
     "name": "coursewright_plan",
@@ -486,24 +491,62 @@ def register(ctx) -> None:
 
     def _course(raw_args: str, **kwargs) -> str:
         args: dict = {}
+        words: list = []
         for token in (raw_args or "").split():
             if token.startswith("--level="):
                 args["level"] = token.split("=", 1)[1]
             elif token.startswith("--lang="):
                 args["language"] = token.split("=", 1)[1]
+            elif token.startswith("--sections="):
+                args["max_sections"] = _as_int(token.split("=", 1)[1])
             elif token.isdigit():
                 args["max_sections"] = int(token)
             elif not token.startswith("-"):
-                args.setdefault("topic", token)
-        if not args.get("topic"):
-            return "Usage: /course <topic> [--level=novice|intermediate|advanced] [--lang=es]"
-        result = json.loads(_wrap(build_course)(args))
-        if not result.get("ok"):
-            return f"coursewright: {result.get('error') or 'build failed'}"
-        warn = f" · {len(result['warnings'])} warning(s)" if result.get("warnings") else ""
-        return (f"**{result['title']}** — {result['sections']} sections, opens at "
-                f"{result['level']}, {result['bytes'] // 1024} KB{warn}.\n"
-                f"`{result['html']}`\n\n{result['preview']}")
+                words.append(token)
+        if words:  # the topic is the whole phrase, not its first word
+            args["topic"] = " ".join(words)
+        topic = str(args.get("topic") or "").strip()
+        if not topic:
+            return ("Usage: /course <topic> [--level=novice|intermediate|advanced] "
+                    "[--lang=es] [--sections=6]")
+
+        # A build takes minutes; slash-command dispatch gives up at 30 s. Start it in the
+        # background and deliver the finished course as a message instead of blocking.
+        key = _topic_key(topic)
+        with _BUILD_LOCK:
+            running = _ACTIVE.get(key)
+            if running is not None and running.is_alive():
+                return (f"Already building **{topic}**. It will appear here when it lands, "
+                        f"or run `/courses` in a few minutes.")
+
+            def _worker() -> None:
+                try:
+                    result = build_course(ctx, dict(args))
+                    warn = (f" · {len(result['warnings'])} build note(s)"
+                            if result.get("warnings") else "")
+                    message = (f"**{result['title']}** is ready. {result['sections']} sections, "
+                               f"opens at {result['level']}, {result['bytes'] // 1024} KB{warn}.\n"
+                               f"`{result['html']}`\n\n{result['preview']}")
+                except Exception as exc:  # a background failure must still reach the user
+                    logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
+                    message = (f"Course build failed for \"{topic}\": "
+                               f"{type(exc).__name__}: {exc}")
+                finally:
+                    with _BUILD_LOCK:
+                        _ACTIVE.pop(key, None)
+                try:
+                    ctx.post_message(message)
+                    logger.info("coursewright: posted build result for %r", topic)
+                except Exception as exc:
+                    logger.warning("coursewright: could not post build result: %s", exc)
+
+            thread = threading.Thread(target=_worker, name=f"coursewright-{key[:24]}", daemon=True)
+            _ACTIVE[key] = thread
+        _record_build({"ok": None, "running": True, "topic": topic, "args": args})
+        thread.start()
+        level = args.get("level") or "intermediate"
+        return (f"Building **{topic}** at {level} depth, about five minutes. "
+                f"It will be posted here when it finishes; `/courses` lists what exists.")
 
     ctx.register_command("course", _course, description="Build an interactive course on a topic",
                          args_hint="<topic> [--level=novice|intermediate|advanced]")
@@ -527,8 +570,15 @@ def register(ctx) -> None:
 
     def _courses(args):
         rows = _inventory()
+        with _BUILD_LOCK:
+            building = [t for t in _ACTIVE.values() if t.is_alive()]
+        head = []
+        if building:
+            head.append(f"Building {len(building)} course(s) now. "
+                        f"The result will be posted when it finishes.")
         if not rows:
-            return "No courses yet — `/course <topic>` builds one."
+            head.append("No courses yet. `/course <topic>` builds one.")
+            return "\n".join(head)
         wanted = (args or "").strip()
         if wanted:
             for row in rows:
@@ -543,7 +593,7 @@ def register(ctx) -> None:
             depth = f"{row['sections']} sections"
             src = f"{row['sources']} sources" if row["sources"] else "no sources"
             lines.append(f"- `{row['slug']}` — {row['title']} ({depth}, {src})")
-        return "\n".join(lines)
+        return "\n".join(head + lines)
 
     ctx.register_command("courses", _courses, description="List built courses",
                          args_hint="[slug]")
