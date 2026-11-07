@@ -32,10 +32,10 @@ coursewright_status()                                  last build, ok or failed
 /courses [slug]
 ```
 
-`/course` returns at once and builds in the background. When the course is ready it is
-posted into the session as a message, with the path and a preview. `/courses` lists what
-exists and says when a build is still running. The tools are synchronous, so a build called
-by the agent blocks that tool call for the few minutes it takes.
+`/course` returns at once and hands the work to the agent as a turn, so the build runs
+where tool progress is visible and the finished course arrives in the conversation. If no
+session can be woken the command falls back to a background build that posts its result.
+The tools are synchronous, so a build the agent calls shows as a long tool call.
 
 Each build writes `$HERMES_HOME/plugin-data/coursewright/courses/<slug>/index.html` and a
 copy in `~/Courses/<slug>/`, with the spec and the research record beside the page.

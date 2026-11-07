@@ -13,8 +13,10 @@ Command:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -510,8 +512,40 @@ def register(ctx) -> None:
             return ("Usage: /course <topic> [--level=novice|intermediate|advanced] "
                     "[--lang=es] [--sections=6]")
 
-        # A build takes minutes; slash-command dispatch gives up at 30 s. Start it in the
-        # background and deliver the finished course as a message instead of blocking.
+        # The dispatcher binds the session in contextvars; os.environ is process-wide and may
+        # still hold another session's id, so use the accessor that prefers the contextvar.
+        session_key = ""
+        try:
+            from gateway.session_context import get_session_env
+
+            session_key = (get_session_env("HERMES_SESSION_KEY")
+                           or get_session_env("HERMES_SESSION_ID") or "")
+        except Exception:  # older layout: fall back to the env vars
+            session_key = (os.environ.get("HERMES_SESSION_KEY")
+                           or os.environ.get("HERMES_SESSION_ID") or "")
+
+        # First choice: hand the job to the agent as a turn, so the build runs where tool
+        # progress is visible and the result cannot vanish. The command itself returns at once.
+        level = args.get("level") or "intermediate"
+        count = args.get("max_sections")
+        instruction = (f"Build a course on \"{topic}\" with coursewright_build at {level} depth"
+                       f"{f', {count} sections' if isinstance(count, int) else ''}. "
+                       f"Say in one line that you are starting it, then while it runs let me see the "
+                       f"tool progress. When it returns, tell me what the course covers, give the "
+                       f"file path, and put the preview directive on its own line.")
+        handed_off = False
+        if session_key:
+            try:
+                handed_off = bool(ctx.inject_message(instruction, role="user", session_key=session_key))
+            except Exception as exc:
+                logger.warning("coursewright: could not hand off to the agent: %s", exc)
+        if handed_off:
+            logger.info("coursewright: /course handed %r to the agent", topic)
+            return (f"On it. Building \"{topic}\" at {level} depth now, which takes about five "
+                    f"minutes. You will see the work happen here and I will show you the course "
+                    f"when it is done.")
+
+        # Fallback when no session can be woken: build in the background and post the result.
         key = _topic_key(topic)
         with _BUILD_LOCK:
             running = _ACTIVE.get(key)
@@ -522,31 +556,48 @@ def register(ctx) -> None:
             def _worker() -> None:
                 try:
                     result = build_course(ctx, dict(args))
-                    warn = (f" · {len(result['warnings'])} build note(s)"
+                    note = (f" It also has {len(result['warnings'])} build note(s)."
                             if result.get("warnings") else "")
-                    message = (f"**{result['title']}** is ready. {result['sections']} sections, "
-                               f"opens at {result['level']}, {result['bytes'] // 1024} KB{warn}.\n"
-                               f"`{result['html']}`\n\n{result['preview']}")
+                    message = (
+                        f"coursewright just finished building \"{result['title']}\": "
+                        f"{result['sections']} sections, {result['bytes'] // 1024} KB, opens at "
+                        f"{result['level']}.{note} Tell me it is ready in a sentence or two, say "
+                        f"what the course covers and where the file is, then put this directive "
+                        f"on its own line:\n{result['preview']}")
                 except Exception as exc:  # a background failure must still reach the user
                     logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
-                    message = (f"Course build failed for \"{topic}\": "
-                               f"{type(exc).__name__}: {exc}")
+                    message = (f"coursewright failed to build the course on \"{topic}\": "
+                               f"{type(exc).__name__}: {exc}. Tell me plainly that it failed and why.")
                 finally:
                     with _BUILD_LOCK:
                         _ACTIVE.pop(key, None)
+                # A plain post lands in the transcript but never wakes the session, which is
+                # what makes the result look like it vanished. Inject as a user turn so the
+                # agent narrates the finished course instead.
+                delivered = False
                 try:
-                    ctx.post_message(message)
-                    logger.info("coursewright: posted build result for %r", topic)
+                    delivered = bool(ctx.inject_message(message, role="user", session_key=session_key))
                 except Exception as exc:
-                    logger.warning("coursewright: could not post build result: %s", exc)
+                    logger.warning("coursewright: inject failed: %s", exc)
+                if not delivered:
+                    handle = ctx.post_message(message)
+                    delivered = bool(getattr(handle, "ok", False))
+                    if not delivered:
+                        logger.warning("coursewright: result not delivered (%s) for %r",
+                                       getattr(handle, "error", "unknown"), topic)
+                logger.info("coursewright: build result delivered=%s for %r", delivered, topic)
 
-            thread = threading.Thread(target=_worker, name=f"coursewright-{key[:24]}", daemon=True)
+            # post_message resolves the chat through a contextvar bound by the dispatcher;
+            # a bare thread does not inherit it, so carry the context across.
+            thread = threading.Thread(target=contextvars.copy_context().run, args=(_worker,),
+                                      name=f"coursewright-{key[:24]}", daemon=True)
             _ACTIVE[key] = thread
         _record_build({"ok": None, "running": True, "topic": topic, "args": args})
         thread.start()
         level = args.get("level") or "intermediate"
-        return (f"Building **{topic}** at {level} depth, about five minutes. "
-                f"It will be posted here when it finishes; `/courses` lists what exists.")
+        return (f"Let's build it. I'm writing the course on \"{topic}\" at {level} depth now, "
+                f"which takes about five minutes. I'll post it here when it is done, "
+                f"or run /courses to see what already exists.")
 
     ctx.register_command("course", _course, description="Build an interactive course on a topic",
                          args_hint="<topic> [--level=novice|intermediate|advanced]")
