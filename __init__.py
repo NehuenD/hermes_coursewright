@@ -87,7 +87,8 @@ BUILD_SCHEMA = {
         "Build the course and write one self-contained interactive HTML page: three depths per "
         "section with an in-place toggle, figures, exercises, and an honest provenance footer. "
         "Give it a topic (plans and writes in one go), a plan_path from coursewright_plan, or a "
-        "spec_path to render an existing spec. Returns paths plus a ready ::preview directive."
+        "spec_path to render an existing spec. Opens the page in the desktop preview pane when "
+        "there is one; otherwise returns a ready ::preview directive to paste."
     ),
     "parameters": {
         "type": "object",
@@ -249,6 +250,29 @@ def build_course(ctx, args: dict) -> dict:
         _release_build(guard)
 
 
+def _open_in_pane(ctx, path: Path, title: str) -> bool:
+    """Show the finished page in the desktop's preview pane beside the chat.
+
+    Best effort by design: the tool belongs to the desktop surface, so on any other
+    surface (Telegram, plain CLI, a headless run) the dispatch answers with an error and
+    the caller falls back to the inline `::preview` directive it returns instead.
+    """
+    try:
+        raw = ctx.dispatch_tool("desktop_preview",
+                                {"action": "open", "url": str(path), "label": str(title)[:40]})
+    except Exception as exc:  # an older host without the tool, or no emitter wired
+        logger.info("coursewright: could not open the preview pane: %s", exc)
+        return False
+    try:
+        answer = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return False
+    if isinstance(answer, dict) and answer.get("error"):
+        logger.info("coursewright: preview pane refused the page: %s", answer.get("error"))
+        return False
+    return True
+
+
 def _build_course(ctx, args: dict) -> dict:
     topic = str(args.get("topic") or "").strip()
     plan_path = str(args.get("plan_path") or "").strip()
@@ -328,7 +352,12 @@ def _build_course(ctx, args: dict) -> dict:
 
     # One course per topic. The model names its own slug per build, so the same topic
     # used to land in a new directory every time; an existing course for this topic wins.
-    clean.setdefault("topic_key", _topic_key(topic or clean["title"]))
+    # A spec re-render keeps the identity it was built with, or the next topic build would
+    # not recognise it as the same course.
+    if isinstance(raw, dict) and str(raw.get("topic_key") or "").strip():
+        clean["topic_key"] = str(raw["topic_key"]).strip()[:120]
+    else:
+        clean.setdefault("topic_key", _topic_key(topic or clean["title"]))
     clean["slug"] = _reuse_slug(clean["slug"], clean["topic_key"])
 
     page = renderer.render(clean)
@@ -356,6 +385,12 @@ def _build_course(ctx, args: dict) -> dict:
     except Exception:
         pass
 
+    # The page is tuned for the pane's width, so the pane is where it belongs: open it there
+    # and let the caller skip the inline directive. Falls back to the directive when the
+    # surface has no pane. The visible mirror is the friendlier path for the tab (a stable
+    # location outside plugin-data) and re-opening the same URL reuses the tab.
+    pane_open = _open_in_pane(ctx, Path(mirror) if mirror else html_path, clean["title"])
+
     result = {
         "ok": True,
         "slug": clean["slug"],
@@ -371,7 +406,8 @@ def _build_course(ctx, args: dict) -> dict:
         "researched": clean["provenance"]["researched"],
         "bytes": len(page.encode("utf-8")),
         "warnings": warnings,
-        "preview": f'::preview{{file="{html_path}"}}',
+        "preview": "" if pane_open else f'::preview{{file="{html_path}"}}',
+        "pane": pane_open,
     }
     _record_build({k: result[k] for k in ("ok", "slug", "title", "sections", "source",
                                           "researched", "bytes")})
@@ -558,8 +594,10 @@ Build the course on {topic} at {level} depth: call coursewright_build exactly on
 {call}
 While it runs, say one line that it is building — the tool call is where the progress shows.
 
-When it returns: two sentences on what the course actually covers, then the file path, then the
-result's preview directive alone on its own line. If it returns ok:false, say plainly why and
+When it returns: two sentences on what the course actually covers, then the file path. If the
+result carries a non-empty "preview" field, put that directive alone on its own line; if it is
+empty the course is already open in the preview pane beside the chat, so do not paste a
+directive of your own. If it returns ok:false, say plainly why and
 stop; do not retry with a different topic or a different tool."""
 
 
@@ -665,7 +703,8 @@ def register(ctx) -> None:
                 message = (f"Your course is ready: \"{result['title']}\", "
                            f"{result['sections']} sections, {result['bytes'] // 1024} KB, "
                            f"opens at {result['level']}.\n"
-                           f"{result['html']}\n\n{result['preview']}")
+                           f"{result['html']}"
+                           + (f"\n\n{result['preview']}" if result.get("preview") else ""))
             except Exception as exc:  # a background failure must still reach the user
                 logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
                 _record_build({"ok": False, "error": f"{type(exc).__name__}: {exc}",
