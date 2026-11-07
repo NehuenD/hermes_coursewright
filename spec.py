@@ -23,12 +23,21 @@ BLOCK_KINDS = {
 EXERCISE_KINDS = {"mcq", "recall"}
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# Section ids land in `id="..."`, href="#..." and the page's own state keys.
+_SID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
 def _s(value: Any, limit: int = 4000) -> str:
     if value is None:
         return ""
     return str(value)[:limit]
+
+
+def _safe_url(value: Any, limit: int = 800) -> str:
+    """Only http(s) survives: these become `href` attributes in the rendered page, and a
+    model-supplied `javascript:` URL is an executable attribute, not a citation."""
+    url = _s(value, limit).strip()
+    return url if re.match(r"^https?://", url, re.I) else ""
 
 
 def _blocks(raw: Any, where: str, warnings: List[str]) -> List[Dict[str, Any]]:
@@ -53,7 +62,7 @@ def _blocks(raw: Any, where: str, warnings: List[str]) -> List[Dict[str, Any]]:
             block["term"] = _s(item.get("term"), 200)
         if kind == "quote":
             block["cite"] = _s(item.get("cite"), 200)
-            block["href"] = _s(item.get("href"), 500)
+            block["href"] = _safe_url(item.get("href"), 500)
         if kind == "callout":
             tone = _s(item.get("tone") or item.get("kind_hint"), 20).strip().lower()
             block["tone"] = tone if tone in {"honesty", "warning", "insight"} else "insight"
@@ -132,7 +141,7 @@ def _resources(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
             continue
         out["reading"].append({
             "title": _s(item.get("title"), 300),
-            "href": _s(item.get("href"), 800),
+            "href": _safe_url(item.get("href")),
             "kind": _s(item.get("kind"), 40),
             "venue": _s(item.get("venue"), 200),
             "year": item.get("year") if isinstance(item.get("year"), int) else None,
@@ -162,15 +171,24 @@ def validate(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
     provenance = raw.get("provenance") if isinstance(raw.get("provenance"), dict) else {}
     sources = []
     for src in (provenance.get("sources") or [])[:40]:
-        if isinstance(src, dict) and _s(src.get("url")).strip():
-            sources.append({"url": _s(src.get("url"), 800), "title": _s(src.get("title"), 300),
+        if isinstance(src, dict) and _safe_url(src.get("url")):
+            sources.append({"url": _safe_url(src.get("url")), "title": _s(src.get("title"), 300),
                             "used_in": [ _s(u, 40) for u in (src.get("used_in") or []) ][:20]})
 
     sections: List[Dict[str, Any]] = []
+    used_ids: set = set()
     for index, raw_section in enumerate(raw.get("sections") or []):
         if not isinstance(raw_section, dict):
             continue
-        sid = _s(raw_section.get("id"), 40).strip().lower() or f"s{index + 1}"
+        sid = _s(raw_section.get("id"), 40).strip().lower()
+        if not _SID_RE.match(sid):        # attribute-safe, or the anchor markup breaks
+            sid = f"s{index + 1}"
+        if sid in used_ids:               # duplicate ids break both anchors and page state
+            base, suffix = sid, 2
+            while f"{base}-{suffix}" in used_ids:
+                suffix += 1
+            sid = f"{base}-{suffix}"
+        used_ids.add(sid)
         where = f"section {sid}"
         levels_raw = raw_section.get("levels") if isinstance(raw_section.get("levels"), dict) else {}
         levels: Dict[str, Any] = {}

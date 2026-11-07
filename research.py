@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import io
 import json
 import logging
@@ -59,7 +60,7 @@ def _http_text(url: str, timeout: float = 14.0) -> str:
 
 
 def _strip_tags(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text or "").strip()
+    return html.unescape(re.sub(r"<[^>]+>", "", text or "")).strip()
 
 
 def _find_wikipedia(topic: str, language: str, limit: int = 3) -> List[Dict[str, str]]:
@@ -109,8 +110,8 @@ def _find_arxiv(topic: str, limit: int = 2) -> List[Dict[str, str]]:
             continue
         found.append({
             "url": ident.group(1).strip(),
-            "title": " ".join((title.group(1) if title else "").split())[:180],
-            "excerpt": " ".join((summary.group(1) if summary else "").split())[:400],
+            "title": html.unescape(" ".join((title.group(1) if title else "").split()))[:180],
+            "excerpt": html.unescape(" ".join((summary.group(1) if summary else "").split()))[:400],
             "domain": "arxiv.org",
         })
     return found
@@ -136,16 +137,21 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _cache_path(cache_dir, topic: str, language: str):
+def _cache_path(cache_dir, topic: str, language: str, *, want_videos: bool = True,
+                max_videos: int = 6, max_sources: int = 12):
     from pathlib import Path
 
-    digest = hashlib.sha1(f"{topic.strip().lower()}|{language}".encode()).hexdigest()[:16]
+    # the caps are part of the identity of the record: a course built with videos off must not
+    # serve its video-less record to the next build that asked for videos
+    digest = hashlib.sha1(
+        f"{topic.strip().lower()}|{language}|v{int(bool(want_videos))}|"
+        f"{int(max_videos)}|{int(max_sources)}".encode()).hexdigest()[:16]
     return Path(cache_dir) / f"research-{digest}.json"
 
 
-def _load_cache(cache_dir, topic: str, language: str) -> Optional[dict]:
+def _load_cache(cache_dir, topic: str, language: str, **caps) -> Optional[dict]:
     try:
-        path = _cache_path(cache_dir, topic, language)
+        path = _cache_path(cache_dir, topic, language, **caps)
         if not path.exists() or time.time() - path.stat().st_mtime > CACHE_TTL_SECONDS:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -157,9 +163,9 @@ def _load_cache(cache_dir, topic: str, language: str) -> Optional[dict]:
     return None
 
 
-def _save_cache(cache_dir, topic: str, language: str, record: dict) -> None:
+def _save_cache(cache_dir, topic: str, language: str, record: dict, **caps) -> None:
     try:
-        path = _cache_path(cache_dir, topic, language)
+        path = _cache_path(cache_dir, topic, language, **caps)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception:
@@ -440,7 +446,8 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
     deadline = time.monotonic() + float(caps.get("timeout") or 150)
 
     if cache_dir and not force:
-        cached = _load_cache(cache_dir, topic, language)
+        cached = _load_cache(cache_dir, topic, language, want_videos=want_videos,
+                             max_videos=max_videos, max_sources=max_sources)
         if cached:
             logger.info("coursewright research: cache hit for %r", topic)
             return cached
@@ -553,7 +560,8 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
         record["warnings"].append(
             f"only {len(record['sources'])} source(s) could be read; the advanced level is lightly grounded")
     if cache_dir:
-        _save_cache(cache_dir, topic, language, record)
+        _save_cache(cache_dir, topic, language, record, want_videos=want_videos,
+                    max_videos=max_videos, max_sources=max_sources)
     logger.info("coursewright research: %d sources, %d videos, %d failures",
                 len(record["sources"]), len(record["videos"]), len(record["failures"]))
     return record

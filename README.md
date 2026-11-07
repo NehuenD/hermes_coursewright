@@ -112,10 +112,13 @@ a laptop, and produces a page near 95 KB with posters inlined.
   paths exist in every course.
 - The plugin detects video transcripts and reports them, and does not quote them at a
   timestamp yet.
-- A slash command has a 30 second budget in the desktop client, so `/course` starts a
-  background build instead of blocking. The result arrives as a posted message, and
-  `/courses` shows it either way. A short lived `-q` session can close before the post
-  lands, so use `/courses` there.
+- A slash command has a 30 second budget in the desktop client, so `/course` does not build
+  inside the command: it hands the build to the agent as a turn, and the tool call is where
+  the progress shows. If no live session can be woken — a gateway that is not running, a chat
+  that has since closed — it falls back to a background build that posts its result, and
+  `/courses` shows the course either way.
+- One build per topic at a time: a second `/course` (or a tool call) for a topic already being
+  built is refused instead of racing the first for the same directory.
 - A running gateway holds the plugin modules and tool schemas it loaded. After changing the
   code, start a new session or restart the gateway.
 

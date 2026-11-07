@@ -21,6 +21,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, List, Optional
 
 try:  # loaded as a package by the plugin loader
     from . import author, render as renderer, research as research_mod, spec as specmod
@@ -39,6 +40,24 @@ _MAX_SECTIONS_BUILT = 7
 # Slash commands get 30 s; a build takes minutes. Builds run on worker threads, one per topic.
 _BUILD_LOCK = threading.Lock()
 _ACTIVE: dict = {}
+# Topic keys with a build in flight in this process (whatever path started it: the tool in an
+# agent turn, or a background fallback thread). Two concurrent builds of one topic would race
+# for the same store directory, so the second is refused instead of half-overwriting the first.
+_RUNNING: set = set()
+
+
+def _claim_build(key: str) -> bool:
+    """True when this caller now owns the build for *key*; False when one is already running."""
+    with _BUILD_LOCK:
+        if key in _RUNNING:
+            return False
+        _RUNNING.add(key)
+        return True
+
+
+def _release_build(key: str) -> None:
+    with _BUILD_LOCK:
+        _RUNNING.discard(key)
 
 PLAN_SCHEMA = {
     "name": "coursewright_plan",
@@ -181,6 +200,11 @@ def make_plan(ctx, args: dict) -> dict:
     plan["default_level"] = level
     plan["requested_topic"] = topic
     plan["planned_at"] = _now()
+    # the model is asked for exactly N sections and sometimes returns more; the plan a user
+    # approves has to be the plan the build will follow
+    wanted = _as_int(args.get("max_sections"))
+    if wanted and isinstance(plan.get("sections"), list) and len(plan["sections"]) > wanted > 0:
+        plan["sections"] = plan["sections"][:wanted]
 
     path = _store() / "plans" / f"{_slug(plan.get('slug') or topic)}.json"
     _write(path, json.dumps(plan, indent=2, ensure_ascii=False))
@@ -212,6 +236,20 @@ def _draft_all(ctx, plan: dict, language: str, max_sections: int, sources: str =
 
 
 def build_course(ctx, args: dict) -> dict:
+    """One build per topic at a time; a second caller is refused instead of racing the first."""
+    topic = str(args.get("topic") or "").strip()
+    guard = _topic_key(topic) or _slug(str(args.get("plan_path") or args.get("spec_path") or "course"))
+    if not _claim_build(guard):
+        return {"ok": False,
+                "error": f"a build for {topic or guard!r} is already running here; wait for it to "
+                         f"finish, or run /courses to see what is on disk"}
+    try:
+        return _build_course(ctx, args)
+    finally:
+        _release_build(guard)
+
+
+def _build_course(ctx, args: dict) -> dict:
     topic = str(args.get("topic") or "").strip()
     plan_path = str(args.get("plan_path") or "").strip()
     spec_path = str(args.get("spec_path") or "").strip()
@@ -234,12 +272,25 @@ def build_course(ctx, args: dict) -> dict:
         if plan_path:
             plan = _read_json(Path(plan_path).expanduser())
         else:
-            made = make_plan(ctx, {"topic": topic, "level": level, "language": language})
+            # The same section count has to reach the planner, or the plan describes eight
+            # sections and the course renders two of them.
+            made = make_plan(ctx, {"topic": topic, "level": level, "language": language,
+                                   "max_sections": _as_int(args.get("max_sections"))})
             if not made.get("ok"):
                 return made
             plan = _read_json(Path(made["plan_path"]))
-        plan["default_level"] = level
+        # a saved plan remembers the depth it was approved for; only an explicit request
+        # overrides it, the session config default must not
+        plan["default_level"] = str(plan.get("default_level") or level)
+        if args.get("level"):
+            plan["default_level"] = level
         language = plan.get("language") or language
+        # A plan that ignored the requested count would leave the course describing sections
+        # it does not contain, so the requested count wins over the model's answer.
+        if isinstance(plan.get("sections"), list) and len(plan["sections"]) > max_sections:
+            logger.info("coursewright: plan had %d sections; keeping the %d requested",
+                        len(plan["sections"]), max_sections)
+            plan["sections"] = plan["sections"][:max_sections]
 
         record = None
         picks: dict = {"videos": [], "reading": []}
@@ -455,6 +506,78 @@ def _selfcheck() -> None:
             raise RuntimeError(f"renderer output missing {needle!r}")
 
 
+_LEVELS = ("novice", "intermediate", "advanced")
+
+
+def _parse_course_args(raw_args: str) -> dict:
+    """`/course how a zipper works --level=novice 6` -> the args dict build_course expects."""
+    args: dict = {}
+    words: list = []
+    for token in (raw_args or "").split():
+        if token.startswith("--level="):
+            args["level"] = token.split("=", 1)[1].strip().lower()
+        elif token.startswith("--lang="):
+            args["language"] = token.split("=", 1)[1]
+        elif token.startswith("--sections="):
+            args["max_sections"] = _as_int(token.split("=", 1)[1])
+        elif token in {"--refresh", "-r"}:
+            args["refresh"] = True
+        elif token.isdigit():
+            args["max_sections"] = int(token)
+        elif not token.startswith("-"):
+            words.append(token)
+    if words:  # the topic is the whole phrase, not its first word
+        args["topic"] = " ".join(words)
+    return args
+
+
+def _level_of(args: dict) -> str:
+    level = str(args.get("level") or "").strip().lower()
+    return level if level in _LEVELS else "intermediate"
+
+
+def _calling_session_key(kwargs: dict) -> str:
+    """The calling chat's routing key: the dispatcher's keyword first, the contextvar second,
+    the process environment only as a last resort (it can hold another session's id)."""
+    key = str((kwargs or {}).get("session_key") or "").strip()
+    if key:
+        return key
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env("HERMES_SESSION_KEY")
+                   or get_session_env("HERMES_SESSION_ID") or "").strip()
+    except Exception:  # older layout: the env vars are all there is
+        return str(os.environ.get("HERMES_SESSION_KEY")
+                   or os.environ.get("HERMES_SESSION_ID") or "").strip()
+
+
+_HANDOFF = """[/course] The /course command parsed this request from the chat.
+
+Build the course on {topic} at {level} depth: call coursewright_build exactly once with
+{call}
+While it runs, say one line that it is building — the tool call is where the progress shows.
+
+When it returns: two sentences on what the course actually covers, then the file path, then the
+result's preview directive alone on its own line. If it returns ok:false, say plainly why and
+stop; do not retry with a different topic or a different tool."""
+
+
+def _handoff_text(topic: str, args: dict) -> str:
+    """The instruction a handed-off `/course` turn runs: explicit tool, explicit arguments."""
+    call = [f"topic={json.dumps(topic, ensure_ascii=False)}",
+            f"level={json.dumps(_level_of(args))}"]
+    sections = _as_int(args.get("max_sections"))
+    if sections:
+        call.append(f"max_sections={sections}")
+    if str(args.get("language") or "").strip():
+        call.append(f"language={json.dumps(str(args['language']).strip())}")
+    if args.get("refresh"):
+        call.append("refresh=true")
+    return _HANDOFF.format(topic=json.dumps(topic, ensure_ascii=False), level=_level_of(args),
+                           call=", ".join(call))
+
+
 def register(ctx) -> None:
     try:
         _selfcheck()
@@ -492,112 +615,88 @@ def register(ctx) -> None:
     )
 
     def _course(raw_args: str, **kwargs) -> str:
-        args: dict = {}
-        words: list = []
-        for token in (raw_args or "").split():
-            if token.startswith("--level="):
-                args["level"] = token.split("=", 1)[1]
-            elif token.startswith("--lang="):
-                args["language"] = token.split("=", 1)[1]
-            elif token.startswith("--sections="):
-                args["max_sections"] = _as_int(token.split("=", 1)[1])
-            elif token.isdigit():
-                args["max_sections"] = int(token)
-            elif not token.startswith("-"):
-                words.append(token)
-        if words:  # the topic is the whole phrase, not its first word
-            args["topic"] = " ".join(words)
+        args = _parse_course_args(raw_args)
         topic = str(args.get("topic") or "").strip()
         if not topic:
             return ("Usage: /course <topic> [--level=novice|intermediate|advanced] "
                     "[--lang=es] [--sections=6]")
 
-        # The dispatcher binds the session in contextvars; os.environ is process-wide and may
-        # still hold another session's id, so use the accessor that prefers the contextvar.
-        session_key = ""
-        try:
-            from gateway.session_context import get_session_env
-
-            session_key = (get_session_env("HERMES_SESSION_KEY")
-                           or get_session_env("HERMES_SESSION_ID") or "")
-        except Exception:  # older layout: fall back to the env vars
-            session_key = (os.environ.get("HERMES_SESSION_KEY")
-                           or os.environ.get("HERMES_SESSION_ID") or "")
-
-        # First choice: hand the job to the agent as a turn, so the build runs where tool
-        # progress is visible and the result cannot vanish. The command itself returns at once.
-        level = args.get("level") or "intermediate"
-        count = args.get("max_sections")
-        instruction = (f"Build a course on \"{topic}\" with coursewright_build at {level} depth"
-                       f"{f', {count} sections' if isinstance(count, int) else ''}. "
-                       f"Say in one line that you are starting it, then while it runs let me see the "
-                       f"tool progress. When it returns, tell me what the course covers, give the "
-                       f"file path, and put the preview directive on its own line.")
-        handed_off = False
-        if session_key:
-            try:
-                handed_off = bool(ctx.inject_message(instruction, role="user", session_key=session_key))
-            except Exception as exc:
-                logger.warning("coursewright: could not hand off to the agent: %s", exc)
-        if handed_off:
-            logger.info("coursewright: /course handed %r to the agent", topic)
-            return (f"On it. Building \"{topic}\" at {level} depth now, which takes about five "
-                    f"minutes. You will see the work happen here and I will show you the course "
-                    f"when it is done.")
-
-        # Fallback when no session can be woken: build in the background and post the result.
+        # The dispatcher passes the calling chat's routing key; os.environ is process-wide and
+        # may hold another session's id, so it is only the last resort.
+        session_key = _calling_session_key(kwargs)
         key = _topic_key(topic)
         with _BUILD_LOCK:
             running = _ACTIVE.get(key)
-            if running is not None and running.is_alive():
-                return (f"Already building **{topic}**. It will appear here when it lands, "
-                        f"or run `/courses` in a few minutes.")
+            building = running is not None and running.is_alive()
+            in_flight = key in _RUNNING
+        if building or in_flight:
+            return (f"Already building **{topic}**. It will appear here when it lands, "
+                    f"or run `/courses` in a few minutes.")
 
-            def _worker() -> None:
-                try:
-                    result = build_course(ctx, dict(args))
-                    note = (f" It also has {len(result['warnings'])} build note(s)."
-                            if result.get("warnings") else "")
-                    message = (
-                        f"coursewright just finished building \"{result['title']}\": "
-                        f"{result['sections']} sections, {result['bytes'] // 1024} KB, opens at "
-                        f"{result['level']}.{note} Tell me it is ready in a sentence or two, say "
-                        f"what the course covers and where the file is, then put this directive "
-                        f"on its own line:\n{result['preview']}")
-                except Exception as exc:  # a background failure must still reach the user
-                    logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
-                    message = (f"coursewright failed to build the course on \"{topic}\": "
-                               f"{type(exc).__name__}: {exc}. Tell me plainly that it failed and why.")
-                finally:
-                    with _BUILD_LOCK:
-                        _ACTIVE.pop(key, None)
-                # A plain post lands in the transcript but never wakes the session, which is
-                # what makes the result look like it vanished. Inject as a user turn so the
-                # agent narrates the finished course instead.
-                delivered = False
-                try:
-                    delivered = bool(ctx.inject_message(message, role="user", session_key=session_key))
-                except Exception as exc:
-                    logger.warning("coursewright: inject failed: %s", exc)
-                if not delivered:
-                    handle = ctx.post_message(message)
-                    delivered = bool(getattr(handle, "ok", False))
-                    if not delivered:
-                        logger.warning("coursewright: result not delivered (%s) for %r",
-                                       getattr(handle, "error", "unknown"), topic)
-                logger.info("coursewright: build result delivered=%s for %r", delivered, topic)
+        # First choice: hand the job to the agent as a turn. A slash command that only returns
+        # text ends the turn there: the desktop prints that text, the session goes idle with no
+        # model reply, and a build finishing minutes later has no live conversation left to
+        # report into. The turn is what makes the work — and its result — visible.
+        handed_off = False
+        if session_key:
+            try:
+                handed_off = bool(ctx.inject_message(_handoff_text(topic, args), role="user",
+                                                     session_key=session_key))
+            except Exception as exc:
+                logger.warning("coursewright: could not hand %r to the agent: %s", topic, exc)
+        if handed_off:
+            logger.info("coursewright: /course handed %r to the agent", topic)
+            _record_build({"ok": None, "running": True, "handed_to_agent": True,
+                           "topic": topic, "args": dict(args)})
+            return (f"On it — building \"{topic}\" at {_level_of(args)} depth as the next turn, so "
+                    f"the work and the finished course both show up here. `/courses` lists what "
+                    f"already exists in the meantime.")
 
-            # post_message resolves the chat through a contextvar bound by the dispatcher;
-            # a bare thread does not inherit it, so carry the context across.
-            thread = threading.Thread(target=contextvars.copy_context().run, args=(_worker,),
-                                      name=f"coursewright-{key[:24]}", daemon=True)
+        # Fallback when no session can be woken (no gateway, no live chat): build in the
+        # background and post the result. Refused posts are injected, and a failed build is
+        # recorded so coursewright_status can say what happened.
+        logger.info("coursewright: no session to hand %r to; building in the background", topic)
+
+        def _worker() -> None:
+            try:
+                result = build_course(ctx, dict(args))
+                if not result.get("ok"):
+                    raise RuntimeError(str(result.get("error") or "the build refused"))
+                message = (f"Your course is ready: \"{result['title']}\", "
+                           f"{result['sections']} sections, {result['bytes'] // 1024} KB, "
+                           f"opens at {result['level']}.\n"
+                           f"{result['html']}\n\n{result['preview']}")
+            except Exception as exc:  # a background failure must still reach the user
+                logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
+                _record_build({"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                               "topic": topic, "args": dict(args)})
+                message = (f"The course on \"{topic}\" failed: {type(exc).__name__}: {exc}")
+            finally:
+                with _BUILD_LOCK:
+                    _ACTIVE.pop(key, None)
+            # Post first: it appends the message without pretending to be user input.
+            handle = ctx.post_message(message)
+            if getattr(handle, "ok", False):
+                logger.info("coursewright: posted build result for %r", topic)
+                return
+            logger.warning("coursewright: post refused (%s) for %r; injecting instead",
+                           getattr(handle, "error", "unknown"), topic)
+            try:  # a refused post still has to reach the user somehow
+                ctx.inject_message(message, role="user", session_key=session_key)
+            except Exception as exc:
+                logger.warning("coursewright: inject fallback failed: %s", exc)
+
+        # post_message resolves the chat through a contextvar bound by the dispatcher;
+        # a bare thread does not inherit it, so carry the context across.
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(_worker,),
+                                  name=f"coursewright-{key[:24]}", daemon=True)
+        with _BUILD_LOCK:
             _ACTIVE[key] = thread
-        _record_build({"ok": None, "running": True, "topic": topic, "args": args})
+        _record_build({"ok": None, "running": True, "topic": topic, "args": dict(args)})
         thread.start()
-        level = args.get("level") or "intermediate"
-        return (f"Let's build it. I'm writing the course on \"{topic}\" at {level} depth now, "
-                f"which takes about five minutes. I'll post it here when it is done, "
-                f"or run /courses to see what already exists.")
+        return (f"Building \"{topic}\" at {_level_of(args)} depth. It takes about five minutes, "
+                f"and the course will appear here as soon as it is done. /courses lists what "
+                f"exists in the meantime.")
 
     ctx.register_command("course", _course, description="Build an interactive course on a topic",
                          args_hint="<topic> [--level=novice|intermediate|advanced]")
@@ -632,12 +731,19 @@ def register(ctx) -> None:
             return "\n".join(head)
         wanted = (args or "").strip()
         if wanted:
-            for row in rows:
-                if row["slug"] == wanted:
-                    return (f"**{row['title']}** — {row['sections']} sections, "
-                            f"{row['sources']} sources, {row['videos']} videos, "
-                            f"{row['bytes'] // 1024} KB, built {row['generated'] or 'unknown'}\n"
-                            f"`{row['html']}`")
+            # exact slug first, then a unique substring: `/courses zipper` should find
+            # `zipper-moving-wedge` instead of claiming nothing is there
+            matches = [row for row in rows if row["slug"] == wanted] or [
+                row for row in rows if wanted.lower() in row["slug"].lower()]
+            if len(matches) == 1:
+                row = matches[0]
+                return (f"**{row['title']}** — {row['sections']} sections, "
+                        f"{row['sources']} sources, {row['videos']} videos, "
+                        f"{row['bytes'] // 1024} KB, built {row['generated'] or 'unknown'}\n"
+                        f"`{row['html']}`")
+            if len(matches) > 1:
+                return ("More than one course matches {0!r}: ".format(wanted)
+                        + ", ".join(f"`{row['slug']}`" for row in matches))
             return f"No course named {wanted!r}."
         lines = [f"**{len(rows)} course(s)**"]
         for row in rows:

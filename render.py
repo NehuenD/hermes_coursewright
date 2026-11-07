@@ -205,8 +205,9 @@ def _figure(spec: Dict[str, Any]) -> str:
             f'<span class="flow-t">{_inline(step)}</span></span>'
             for i, step in enumerate(steps))
         cols = len(steps) if len(steps) <= 4 else 3
+        spoken = html.escape(" then ".join(steps), quote=True)
         return (f'<div class="flow" style="--cols:{cols}" role="img" '
-                f'aria-label="{" then ".join(steps)}">{parts}</div>')
+                f'aria-label="{spoken}">{parts}</div>')
     if kind == "trajectory":
         n = spec.get("n") if isinstance(spec.get("n"), int) else 27
         return (f'<canvas class="plot" data-plot="trajectory" data-n="{max(3, min(int(n), 97))}"'
@@ -354,7 +355,9 @@ def _provenance_footer(spec: Dict[str, Any], identity: Dict[str, str]) -> str:
             f'<li id="src-{i + 1}"><a href="{html.escape(s["url"], quote=True)}" '
             f'rel="noopener noreferrer" target="_blank">{_inline(s["title"] or s["url"])}</a> '
             f'<span class="prov-dom">{_inline(_domain_of(s["url"]))}</span></li>'
-            for i, s in enumerate(prov["sources"][:24]))
+            # the validator keeps up to 40 sources and a marker may cite any of them, so the
+            # footer has to list all of them or [n] dangles
+            for i, s in enumerate(prov["sources"][:40]))
         sources = f'<div class="prov-sources"><span class="prov-label">Sources</span><ol>{items}</ol></div>'
     warnings = ""
     if prov["warnings"]:
@@ -734,6 +737,10 @@ _JS = """
   var KEY='coursewright:'+document.body.dataset.slug;
   var state={level:root.dataset.level,seen:{},answers:{}};
   try{var raw=store&&store.getItem(KEY);if(raw)state=Object.assign(state,JSON.parse(raw))}catch(e){}
+  /* a stored level from another build (or a corrupted one) would set data-level to a name no
+     rule matches, which hides every level body: fall back to the page's own default */
+  var LEVELS={novice:1,intermediate:1,advanced:1};
+  if(!LEVELS[state.level])state.level=root.dataset.level||'intermediate';
   function save(){try{store&&store.setItem(KEY,JSON.stringify(state))}catch(e){}}
   function applyLevel(level,persist){
     root.dataset.level=level;state.level=level;

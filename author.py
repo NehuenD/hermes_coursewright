@@ -216,6 +216,7 @@ def plan_course(ctx, *, topic: str, level: str = "intermediate", language: str =
                 sections: Optional[int] = None,
                 forced_identity: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Stage 1. Returns a validated plan dict (never raises)."""
+    requested = sections if isinstance(sections, int) and 2 <= sections <= MAX_SECTIONS else None
     identity_extra = ""
     if forced_identity:
         identity_extra += ("\nUse exactly this identity; it was assigned to keep the course set "
@@ -232,25 +233,25 @@ def plan_course(ctx, *, topic: str, level: str = "intermediate", language: str =
                     .replace("{hard_rules}", HARD_RULES.format(language=language))
                     + identity_extra)
     payload = f"Topic: {topic}\nOpens at depth: {level}\nLanguage: {language}\n"
-    if isinstance(sections, int) and 2 <= sections <= 8:
-        payload += f"Plan exactly {sections} sections.\n"
+    if requested:
+        payload += f"Plan exactly {requested} sections.\n"
 
     plan = _ask(ctx, instructions=instructions, payload=payload, purpose="coursewright.plan",
                 max_tokens=_PLAN_TOKENS)
     if not isinstance(plan, dict) or not isinstance(plan.get("sections"), list):
         return _fallback_plan(topic, language)
 
-    sections = []
+    planned = []
     for item in plan["sections"][:MAX_SECTIONS]:
         if not isinstance(item, dict) or not str(item.get("title") or "").strip():
             continue
-        sections.append({
+        planned.append({
             "title": str(item.get("title"))[:120],
             "eyebrow": str(item.get("eyebrow") or "")[:40],
             "hook": str(item.get("hook") or "")[:200],
             "teaches": str(item.get("teaches") or "")[:300],
         })
-    if len(sections) < 3:
+    if len(planned) < min(3, requested or 3):
         return _fallback_plan(topic, language)
 
     identity = tokens.resolve(forced_identity or plan.get("identity"))
@@ -268,7 +269,7 @@ def plan_course(ctx, *, topic: str, level: str = "intermediate", language: str =
         "subtitle": subtitle,
         "thesis": str(plan.get("thesis") or "")[:600],
         "outcomes": [str(o)[:200] for o in (plan.get("outcomes") or [])][:5],
-        "sections": sections,
+        "sections": planned,
         "identity": identity,
         "language": language,
     }
@@ -406,7 +407,8 @@ def draft_section(ctx, plan: Dict[str, Any], index: int, *, language: str = "en"
         problems.append(f"this section's exercise must be a {required_kind}, not a {got_kind}")
     if problems and not retry_errors:
         logger.info("coursewright: retrying section %s (%s)", index + 1, problems[:2])
-        return draft_section(ctx, plan, index, language=language, retry_errors=problems)
+        return draft_section(ctx, plan, index, language=language, sources=sources,
+                             retry_errors=problems)
     if problems:
         section.setdefault("_warnings", []).extend(problems)
     return section
@@ -646,7 +648,7 @@ def pick_resources(ctx, plan: Dict[str, Any], record: Dict[str, Any]) -> Dict[st
                 "url": source["url"],
                 "title": str(item.get("title") or source["title"])[:220],
                 "kind": _honest_kind(str(item.get("kind") or ""), source["url"]),
-                "venue": source.get("domain") or _guess_kind(source["url"]),
+                "venue": source.get("domain") or "",
                 "year": _honest_year(item.get("year"), source),
                 "why": str(item.get("why") or "")[:220],
                 "level": str(item.get("level") or "")[:20],
@@ -690,7 +692,7 @@ def assemble(plan: Dict[str, Any], sections: List[Dict[str, Any]], *, topic: str
             logger.info("coursewright: drew a flow figure for %s from its steps block",
                         clean_section.get("id"))
             # the missing-figure complaint is resolved by the figure we just drew
-            warnings = [w for w in warnings if "no figure block" not in w]
+            warnings = [w for w in warnings if "no figure" not in w]
         clean_sections.append(clean_section)
 
     record = research or {}
