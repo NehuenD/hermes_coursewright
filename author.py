@@ -39,7 +39,7 @@ BLOCK_MENU = """Available block kinds (use several different ones; never invent 
 - {"kind":"steps","items":["first","second","third"]}
 - {"kind":"comparison","left":"A","right":"B","items":["a1","b1","a2","b2"]}  (items alternate left,right)
 - {"kind":"timeline","items":["1937 — something happened","1993 — something else"]}
-- {"kind":"math","md":"plain text math; _x for subscript, ^x for superscript"}
+- {"kind":"math","md":"plain text math: _x or _{...} for a subscript, ^x or ^{...} for a superscript. No LaTeX, no dollar signs, no HTML"}
 - {"kind":"code","lang":"python","code":"short, runnable, commented"}
 - {"kind":"aside","md":"one sentence of nuance"}
 - {"kind":"checkpoint","md":"one sentence: what the reader should now be able to do"}
@@ -47,7 +47,8 @@ BLOCK_MENU = """Available block kinds (use several different ones; never invent 
 
 FIGURE_MENU = """{"type":"flow","steps":["token id","embedding","attention head","feed-forward","logits"]}
        Best for any process, pipeline, architecture or causal chain: 3-6 short steps, two or
-       three words each. No data needed.
+       three words each. No data needed. A step label may carry a symbol: W_Q multiplies, or
+       write W_{Q} for a multi-character subscript.
        or {"type":"bars","points":[{"label":"2019","value":12},{"label":"2024","value":31}],"xlabel":"year","ylabel":"count"}
        or {"type":"line","points":[{"label":"0","value":1},{"label":"1","value":4}]}
        A course should carry at least one figure when the subject has a natural structure or
@@ -76,6 +77,9 @@ advanced:
 HARD_RULES = """HARD RULES:
 - Never invent a citation, URL, DOI, page number, ISBN, or direct quotation. Naming a
   well-known result and its author is fine; a fake reference is not.
+- Math is plain text, in every block and in figure labels: a subscript is an underscore after
+  the base (W_Q), a superscript a caret (K^T), and a multi-character script is wrapped in curly
+  braces. Never LaTeX, never dollar signs, never HTML — anything else prints literally.
 - No block may exceed 70 words. A section may not exceed 240 words per level.
 - Write in {language}.
 - Do not mention that you are an AI, do not address the reader's level, do not write

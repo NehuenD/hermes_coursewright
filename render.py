@@ -32,6 +32,34 @@ _CITE_RE = re.compile(r"\[(\d{1,2})\](?!\()")
 
 _CODE_SENTINEL = "\x00code{}\x00"
 
+# ---- math tokens in ordinary prose and figure labels -------------------------------
+# `W_Q` is a subscript; `web_search` is an identifier. The difference is the base: one
+# letter (or a chemical-style `H_2O`) is math, a multi-letter base is a word with an
+# underscore in it. These run in prose, steps, comparison cells and flow labels, where
+# `_scripts(aggressive=True)` would mangle identifiers.
+_BARE_SCRIPT_RE = re.compile(
+    r"(?<![\w])([A-Za-z])_(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3})(?![\w])")
+_BARE_FORMULA_RE = re.compile(r"([A-Z])_([0-9]{1,2})(?![a-z])")   # H_2O, C_6H_12, H_12
+_BARE_CARET_RE = re.compile(
+    r"(?<![\w])([A-Za-z0-9])\^(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3})(?![\w])")
+# plain-text conventions the model already uses: R^(n×d) and sqrt(d_k)
+_PAREN_SUPER_RE = re.compile(r"(?<![\w])([A-Za-z0-9])\^\(([^()\n]{1,28})\)")
+_PLAIN_SQRT_RE = re.compile(r"(?<![\w])sqrt\s*\(([^()\n]{1,40})\)")
+
+
+def _wrap_script(tag: str, match: re.Match) -> str:
+    """The base stays outside the tag: `W_Q` is W with a small Q, not a small WQ."""
+    return f"{match.group(1)}<{tag}>{match.group(2).strip('{}')}</{tag}>"
+
+
+def _bare_scripts(text: str) -> str:
+    """`W_Q` -> W<sub>Q</sub>, `K^T` -> K<sup>T</sup>, `H_2O` -> H<sub>2</sub>O."""
+    text = _PAREN_SUPER_RE.sub(lambda m: f"{m.group(1)}<sup>{m.group(2)}</sup>", text)
+    text = _PLAIN_SQRT_RE.sub(lambda m: f"√({m.group(1)})", text)
+    text = _BARE_FORMULA_RE.sub(lambda m: _wrap_script("sub", m), text)
+    text = _BARE_SCRIPT_RE.sub(lambda m: _wrap_script("sub", m), text)
+    return _BARE_CARET_RE.sub(lambda m: _wrap_script("sup", m), text)
+
 
 def _scripts(text: str, *, aggressive: bool = False) -> str:
     """Escaped text -> sub/sup.
@@ -80,6 +108,9 @@ def _inline(text: str) -> str:
     out = _CITE_RE.sub(r'<sup class="cite"><a href="#src-\1">\1</a></sup>', out)
     out = _BOLD_RE.sub(r"<strong>\1</strong>", out)
     out = _ITAL_RE.sub(r"<em>\1</em>", out)
+    # math that turns up outside a `math` block (figure labels, a prose sentence that
+    # mentions W_Q) gets the same sub/sup treatment, plus LaTeX glyphs if it slipped in
+    out = _bare_scripts(_detex(out))
     out = _scripts(out, aggressive=False)
     for index, code in enumerate(held):
         out = out.replace(_CODE_SENTINEL.format(index), f"<code>{code}</code>")
@@ -89,11 +120,113 @@ def _inline(text: str) -> str:
 _MATH_FUNCS = re.compile(r"\b(log|ln|exp|max|min|sup|inf|lim|E|Pr|gcd|mod)\b")
 
 
+# A model that slips into LaTeX used to print `\frac{a}{b}` and `$\alpha$` literally on the
+# page. Converting the common commands is cheaper than a math typesetter and much better
+# than a broken-looking equation.
+_LATEX_SYMBOLS = {
+    "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓",
+    "to": "→", "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒", "leftrightarrow": "↔",
+    "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "neq": "≠", "ne": "≠",
+    "approx": "≈", "equiv": "≡", "sim": "∼", "propto": "∝",
+    "infty": "∞", "partial": "∂", "nabla": "∇", "sum": "∑", "prod": "∏", "int": "∫",
+    "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆", "cup": "∪", "cap": "∩",
+    "forall": "∀", "exists": "∃", "emptyset": "∅", "ldots": "…", "dots": "…", "cdots": "⋯",
+    "prime": "′", "degree": "°",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι",
+    "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "omicron": "ο",
+    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ",
+    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
+    "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+    "quad": " ", "qquad": "  ", "text": "", "mathrm": "", "operatorname": "",
+    "left": "", "right": "",
+}
+_LATEX_WRAP_RE = re.compile(r"\\(?:mathrm|text|operatorname|mathit|mathbf|textbf)\s*\{([^{}]*)\}")
+_LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)\s*([()\[\]|])")
+_LATEX_CMD_RE = re.compile(r"\\\s*([A-Za-z]+)")
+_LATEX_DELIM_RE = re.compile(r"\\[()\[\]]")
+_DOLLAR_RE = re.compile(r"\${1,2}([^$]{1,300})\${1,2}")
+
+
+def _read_group(text: str, index: int) -> tuple:
+    """`text[index:]` starts with `{`: return (inner, index_after) or (None, index)."""
+    if index >= len(text) or text[index] != "{":
+        return None, index
+    depth, start = 0, index
+    while index < len(text):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+        index += 1
+    return None, start
+
+
+def _expand_latex(text: str, display: bool, depth: int = 0) -> str:
+    """\\frac / \\sqrt with balanced-brace arguments, recursively.
+
+    A regex cannot do this: `\\frac{\\exp(e_{ij})}{...}` has braces inside its own argument,
+    and matching stopped at the first `}`, which printed `frac{...}` on the page.
+    """
+    if depth > 4:
+        return text
+    out: list = []
+    index = 0
+    while index < len(text):
+        if text.startswith("\\frac", index):
+            after = index + 5
+            while after < len(text) and text[after].isspace():
+                after += 1
+            numerator, next_index = _read_group(text, after)
+            if numerator is not None:
+                while next_index < len(text) and text[next_index].isspace():
+                    next_index += 1
+                denominator, end_index = _read_group(text, next_index)
+                if denominator is not None:
+                    num = _expand_latex(numerator, display, depth + 1)
+                    den = _expand_latex(denominator, display, depth + 1)
+                    out.append(f'<span class="frac"><span class="num">{num}</span>'
+                               f'<span class="den">{den}</span></span>' if display
+                               else f"{num}/{den}")
+                    index = end_index
+                    continue
+        if text.startswith("\\sqrt", index):
+            after = index + 5
+            while after < len(text) and text[after].isspace():
+                after += 1
+            radicand, next_index = _read_group(text, after)
+            if radicand is not None:
+                inner = _expand_latex(radicand, display, depth + 1)
+                out.append(f'<span class="sqrt">{inner}</span>' if display else f"√({inner})")
+                index = next_index
+                continue
+        out.append(text[index])
+        index += 1
+    return "".join(out)
+
+
+def _detex(text: str, *, display: bool = False) -> str:
+    """LaTeX that slipped through -> glyphs. `display` builds stacked fractions."""
+    tall = "\\frac" in text
+    text = _expand_latex(text, display)
+    # a delimiter that encloses a stacked fraction has to grow with it
+    text = _LEFT_RIGHT_RE.sub(
+        lambda m: f'<span class="dlg">{m.group(1)}</span>' if tall and display else m.group(1), text)
+    text = _LATEX_WRAP_RE.sub(lambda m: m.group(1), text)
+    text = _DOLLAR_RE.sub(lambda m: m.group(1), text)
+    text = _LATEX_DELIM_RE.sub("", text)
+    return _LATEX_CMD_RE.sub(lambda m: _LATEX_SYMBOLS.get(m.group(1), m.group(1)), text)
+
+
 def _math(text: str) -> str:
     """Escape, then upright function names and sub/sup (function names first, so a
     generated <sup> tag is never mistaken for the word "sup")."""
-    out = html.escape(_TAG_RE.sub("", text or ""), quote=False)
+    out = _detex(html.escape(_TAG_RE.sub("", text or ""), quote=False), display=True)
     out = _MATH_FUNCS.sub(r'<span class="fn">\1</span>', out)
+    out = _bare_scripts(out)
     out = _scripts(out, aggressive=True)
     return f'<span class="m">{out}</span>'
 
@@ -135,6 +268,14 @@ def _fmt_duration(seconds: Any) -> str:
 # --------------------------------------------------------------------------
 # blocks
 # --------------------------------------------------------------------------
+def _spoken_label(text: str) -> str:
+    """How a figure step is read aloud: `W_Q` is "W sub Q", not "W underscore Q"."""
+    out = re.sub(r"(?<![\w])sqrt\s*\(", "√(", str(text or ""))
+    out = re.sub(r"[_^]\{?([^}\s]{1,12})\}?",
+                 lambda m: (" sup " if m.group(0)[0] == "^" else " sub ") + m.group(1), out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def _block(block: Dict[str, Any]) -> str:
     kind = block["kind"]
     if kind in {"prose", "checkpoint"}:
@@ -205,7 +346,7 @@ def _figure(spec: Dict[str, Any]) -> str:
             f'<span class="flow-t">{_inline(step)}</span></span>'
             for i, step in enumerate(steps))
         cols = len(steps) if len(steps) <= 4 else 3
-        spoken = html.escape(" then ".join(steps), quote=True)
+        spoken = html.escape(" then ".join(_spoken_label(s) for s in steps), quote=True)
         return (f'<div class="flow" style="--cols:{cols}" role="img" '
                 f'aria-label="{spoken}">{parts}</div>')
     if kind == "trajectory":
@@ -462,7 +603,6 @@ a:hover{text-decoration-thickness:2px}
   html[data-layout="rail"] .cover-side{padding-top:1.9rem}
   html[data-layout="rail"] .cover-side .outcomes{margin-bottom:1.5rem}
   html[data-layout="rail"] .cover-side .cta{display:block;margin-bottom:1rem}
-  html[data-layout="rail"] .cover-side .est{display:flex;flex-direction:column;gap:.2rem;margin-top:.7rem}
 }
 
 /* cover */
@@ -558,6 +698,20 @@ code{font-family:var(--mono);font-size:.88em;background:var(--surface);padding:.
 .m{font-style:italic;letter-spacing:.01em;white-space:nowrap}
 .m sub,.m sup{font-size:.68em;font-style:normal}
 .m .fn{font-style:normal;letter-spacing:0}
+/* sub/sup outside a math block: a figure label or a symbol named in prose */
+sub,sup{font-size:.72em;line-height:0}
+.flow-t sub,.flow-t sup,.steps sub,.steps sup,td sub,td sup{font-size:.76em}
+/* a stacked fraction and a radicand, for LaTeX that slipped into a math block */
+.m .frac{display:inline-flex;flex-direction:column;vertical-align:-0.42em;text-align:center;
+  font-size:.94em;line-height:1.08;margin:0 .16em}
+.m .frac .num{border-bottom:1px solid currentColor;padding:0 .24em .08em}
+.m .frac .den{padding:.08em .24em 0}
+.m .sqrt{border-top:1px solid currentColor;padding:.02em .2em 0 .12em}
+.m .sqrt::before{content:"√";margin-right:.04em;border:0}
+/* a parenthesis that has to span a stacked fraction, and long formulas that may wrap */
+.m .dlg{display:inline-block;transform:scaleY(2.2);transform-origin:center;line-height:1}
+.mathblock{overflow-x:auto}
+.mathblock .m{white-space:normal}
 .cite a{text-decoration:none;font-family:var(--mono);font-size:.62em;color:var(--accent2);
   padding:0 .08em;margin-left:.06em;vertical-align:super;line-height:1;
   border-bottom:1px solid color-mix(in srgb,var(--accent2) 45%,transparent)}
@@ -568,6 +722,9 @@ code{font-family:var(--mono);font-size:.88em;background:var(--surface);padding:.
 .cta .btn{font-size:.9rem;padding:.55em 1.2em}
 .cta .est{font-family:var(--mono);font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;
   color:color-mix(in srgb,var(--ink) 74%,var(--bg))}
+/* two deliberate lines: the count/duration, then the depth it opens at */
+.cta .est span{display:block}
+.cta .est span + span{margin-top:.15rem}
 .resume{font-family:var(--mono);font-size:.72rem;letter-spacing:.04em;margin:0 0 0;
   color:color-mix(in srgb,var(--ink) 64%,var(--bg))}
 .resume[hidden]{display:none}
@@ -1133,7 +1290,7 @@ def render(spec: Dict[str, Any], *, mode: str = "auto") -> str:
         + '</div>\n<div class="cover-side">\n'
         + (f'<ul class="outcomes">{outcomes}</ul>\n' if outcomes else "")
         + f'<div class="cta"><button class="btn primary" type="button" id="start">Start reading</button>'
-        + f'<span class="est"><span>{len(spec["sections"])} sections · ~{minutes} min</span>'
+        + f'<span class="est"><span>{len(spec["sections"])} sections · ~{minutes} min</span> '
         + f'<span>opens at {spec["default_level"]}</span></span></div>\n'
         + '<div class="resume" id="resume" hidden></div>\n'
         + "</div>\n</div></header>\n"

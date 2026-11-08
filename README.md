@@ -86,6 +86,10 @@ a laptop, and produces a page near 95 KB with posters inlined.
   switching moves nothing on screen.
 - Figures sit in a shared slot above the levels, so a novice sees the diagram an advanced
   reader sees.
+- Math is plain text: `W_Q` renders as a subscript base plus script, `K^T` as a
+  superscript, `R^(n×d)` and `sqrt(d_k)` too, and only in a `math` block does it turn
+  LaTeX it was told not to write into a stacked fraction and a radical rather than
+  printing it. A multi-letter base (`web_search`) is left alone: it is an identifier.
 - Print drops the rail, the depth bar, the buttons and the video posters, turns dark cards
   into outlined boxes, labels each level, and appends the URL after every link.
 - Progress, depth and answers persist in `localStorage` under `coursewright:<slug>`.
