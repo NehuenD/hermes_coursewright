@@ -619,9 +619,12 @@ def _build_course(ctx, args: dict) -> dict:
         "pane": pane_open,
         "surface": surface,
         "open": (f"open \"{mirror or html_path}\"" if surface not in {"desktop", ""} else ""),
-        "readers": (record or {}).get("readers", []),
-        "sources": len((record or {}).get("sources") or []),
-        "videos": len((record or {}).get("videos") or []),
+        # a re-render from a saved spec has no research record in hand, so the counts have to
+        # come off the spec: reporting 0 sources for a page whose footer lists nine is a lie
+        # the agent would repeat back to the user
+        "readers": (record or {}).get("readers") or clean["provenance"]["readers"],
+        "sources": len((record or {}).get("sources") or []) or len(clean["provenance"]["sources"]),
+        "videos": len((record or {}).get("videos") or []) or len(clean["resources"]["videos"]),
     }
     _record_build({k: result[k] for k in ("ok", "slug", "title", "sections", "source",
                                           "researched", "bytes", "words")})
@@ -766,7 +769,8 @@ def _selfcheck() -> None:
         "language": "en", "default_level": "intermediate",
         "identity": {"palette": "ink-copper", "type_pairing": "humanist-serif",
                      "layout": "single", "motion": "restrained", "rationale": ""},
-        "provenance": {"researched": False, "finders": [], "readers": [], "sources": [],
+        "provenance": {"researched": True, "finders": ["web_search"], "readers": ["web_extract"],
+                       "sources": [{"url": "https://example.org/self", "title": "Self check"}],
                        "failures": [], "warnings": [], "generated": ""},
         "resources": {"videos": [], "reading": []},
         "sections": [{

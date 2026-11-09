@@ -153,9 +153,13 @@ at once, across processes as well as threads.
 - The model never writes HTML or CSS. It fills a spec and the renderer draws the page, so
   the renderer drops an unknown block kind with a warning instead of rendering it raw.
 - A course cannot claim research it did not do. With no sources the page prints an
-  Unresearched notice under the call to action, and repeats it in the footer.
+  Unresearched notice under the call to action, and the footer says what actually happened
+  in words, never as a count of zero: "written without a research pass, no outside sources
+  were read, 2 dead ends". A course with videos but no readable page says the videos were
+  checked for relevance, not for accuracy.
 - A citation cannot point at a page that was not read. Markers resolve into the footer
-  list, which names each domain.
+  list, which names each domain, and a marker past the end of that list is dropped rather
+  than linked to nothing.
 - A model that calls a blog post a paper gets corrected, and a year survives only when it
   appears in the source text.
 - A figure whose shape makes no sense (`steps` that is not a list, one bar) is dropped with

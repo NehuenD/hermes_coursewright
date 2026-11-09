@@ -315,6 +315,26 @@ class TestBuild(StoreCase):
         self.assertIn("no renderable sections", result["error"])
         self.assertFalse((self.root / "courses").exists())
 
+    def test_a_rendered_spec_reports_the_sources_the_page_has(self):
+        """A re-render has no research record, so the counts come off the spec."""
+        spec_path = self.root / "saved.json"
+        spec_path.write_text(json.dumps({
+            "slug": "saved", "title": "Saved", "language": "en", "default_level": "intermediate",
+            "sections": [{"id": "s1", "title": "S", "levels": {lvl: {"blocks": [
+                {"kind": "prose", "md": "text"}]} for lvl in ("novice", "intermediate", "advanced")}}],
+            "provenance": {"researched": True, "finders": ["web_search"],
+                           "readers": ["web_extract"],
+                           "sources": [{"url": "https://example.org/a", "title": "A"},
+                                       {"url": "https://example.org/b", "title": "B"}],
+                           "failures": [], "warnings": [], "generated": ""},
+            "resources": {"videos": [], "reading": []},
+        }))
+        ctx = FakeCtx(config={"courses_dir": ""})
+        result = cw.build_course(ctx, {"spec_path": str(spec_path)})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["sources"], 2)
+        self.assertEqual(result["readers"], ["web_extract"])
+
     def test_videos_survive_research_off(self):
         """enable_videos on its own must still collect a watch list.
 
@@ -489,6 +509,18 @@ class TestMath(unittest.TestCase):
                      "Round 1 over {low_, lower_, lowest_}, c = 1 each:",
                      "Position codes are built from sines and cosines; each pair runs at its own frequency."):
             self.assertEqual(render._math_line(line).count('class="m-eq"'), 1, line)
+
+    def test_several_definitions_on_one_line_are_not_one_chain(self):
+        """`q = h W_Q, k = h W_K, v = h W_V` is three definitions, not the chain q = h W_Q, k."""
+        rows = render._math_line("q_i = h_i W_Q, k_j = h_j W_K, v_j = h_j W_V")
+        self.assertEqual(rows.count('class="m-eq"'), 3)
+        self.assertEqual(rows.count('class="m-lhs"'), 3)
+        lefts = rows.split('class="m-lhs">')[1:]
+        for expected, chunk in zip(("q", "k", "v"), lefts):
+            self.assertIn(f"<i>{expected}</i>", chunk[:40], chunk[:60])
+        # the comma that joins a tuple is not a definition boundary
+        self.assertEqual(render._math_line("(x, y) = (1, 2)").count('class="m-eq"'), 1)
+        self.assertEqual(render._math_line("a = f(x, y)").count('class="m-eq"'), 1)
 
     def test_operators_and_signs(self):
         out = render._math("1.0*0.9 + (-0.4)*(-0.3) = 0.90 - 0.12 = 0.78")
@@ -734,6 +766,58 @@ class TestPage(unittest.TestCase):
     def test_level_change_redraws_figures(self):
         page = self._page()
         self.assertIn("if(typeof draw==='function')draw()", page)
+
+
+class TestUnsourcedPage(unittest.TestCase):
+    """A course with nothing behind it says so in words — never as a count of zero."""
+
+    def _page(self, sources=(), videos=(), researched=True, finders=("web_search",)):
+        raw = {"slug": "p", "title": "T", "language": "en", "default_level": "intermediate",
+               "identity": {}, "outcomes": [],
+               "provenance": {"researched": researched, "finders": list(finders), "readers": [],
+                              "sources": [{"url": u, "title": "S"} for u in sources],
+                              "failures": [], "warnings": [], "generated": "2026-11-09T10:00:00Z"},
+               "resources": {"videos": [{"id": str(i), "title": "V", "channel": "C", "duration": 60,
+                                         "why": "", "transcript": False, "thumb": "none",
+                                         "thumb_data": "", "level": ""} for i in range(len(videos))],
+                             "reading": []},
+               "sections": [{"id": "s1", "title": "S", "levels": {
+                   lvl: {"blocks": [{"kind": "prose", "md": "x [1] and [9]"}]}
+                   for lvl in ("novice", "intermediate", "advanced")}}]}
+        clean, _ = spec.validate(raw)
+        return render.render(clean)
+
+    def test_a_zero_is_not_printed_as_a_source_count(self):
+        page = self._page(researched=False, finders=())
+        self.assertNotIn("0 source", page)
+        self.assertIn("Written without a research pass", page)
+        # the empty list is not rendered as an empty "Sources" heading either
+        self.assertNotIn('class="prov-sources"', page)
+
+    def test_search_that_read_nothing_says_that_instead(self):
+        page = self._page(videos=("a", "b"))
+        self.assertNotIn("0 source", page)
+        self.assertIn("Searched with web search", page)
+        self.assertIn("nothing could be read", page)
+        self.assertIn("2 videos (not checked for accuracy)", page)
+
+    def test_a_real_source_list_still_reads_as_before(self):
+        page = self._page(sources=("https://example.org/a",), videos=("a",))
+        self.assertIn("1 source read", page)
+        self.assertIn('class="prov-sources"', page)
+        self.assertIn("1 video", page)
+        self.assertNotIn("not checked for accuracy", page)
+
+    def test_a_citation_marker_with_no_source_is_not_a_dead_link(self):
+        page = self._page()
+        self.assertNotIn('href="#src-1"', page)
+        self.assertNotIn('href="#src-9"', page)
+        self.assertNotIn("[1]", page)
+
+    def test_a_citation_inside_the_source_list_resolves(self):
+        page = self._page(sources=("https://example.org/a", "https://example.org/b"))
+        self.assertIn('href="#src-1"', page)      # [1] in prose
+        self.assertNotIn('href="#src-9"', page)   # [9] has nothing behind it
 
 
 class TestDevImportPath(unittest.TestCase):

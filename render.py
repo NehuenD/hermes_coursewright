@@ -7,6 +7,7 @@ CSS; it fills the spec, and this module draws it from the design-token space in
 
 from __future__ import annotations
 
+import contextvars
 import html
 import json
 import re
@@ -35,6 +36,20 @@ _CODE_RE = re.compile(r"`([^`]+)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 # a bare [3] (not a markdown link) is a citation marker for the source list in the footer
 _CITE_RE = re.compile(r"\[(\d{1,2})\](?!\()")
+# How many sources the footer will actually list, set by render() for the page being drawn.
+# An unsourced course has no #src-N anchor, so a marker must not become a link to nothing;
+# a contextvar rather than a module global because two subjects can render in two threads.
+_CITE_LIMIT: contextvars.ContextVar = contextvars.ContextVar("coursewright_cite_limit",
+                                                            default=None)
+
+
+def _cite(match: re.Match) -> str:
+    limit = _CITE_LIMIT.get()
+    number = int(match.group(1))
+    if limit is not None and not 1 <= number <= limit:
+        return ""       # nothing to cite: the sentence stands, the dead marker does not
+    return f'<sup class="cite"><a href="#src-{number}">{number}</a></sup>'
+
 
 
 # ---- math tokens in ordinary prose and figure labels -------------------------------
@@ -162,7 +177,7 @@ def _inline(text: str) -> str:
     raw = re.sub(r"(?<=\d)\s*\*\s*(?=\d)", " · ", raw)
     # code spans are literal: hold them aside so no other rule rewrites their bytes
     raw = _CODE_RE.sub(lambda m: _stash(f"<code>{m.group(1)}</code>"), raw)
-    out = _CITE_RE.sub(r'<sup class="cite"><a href="#src-\1">\1</a></sup>', raw)
+    out = _CITE_RE.sub(_cite, raw)
     out = _BOLD_RE.sub(r"<strong>\1</strong>", out)
     out = _ITAL_RE.sub(r"<em>\1</em>", out)
     # links next, and the anchor is held like a code span: the prose math rules used to run
@@ -375,28 +390,56 @@ def _split_stages(text: str) -> list:
     return stages
 
 
+def _top_level_commas(text: str) -> list:
+    """Split on commas outside brackets; `(x, y) = (1, 2)` stays one piece."""
+    pieces, current, depth = [], [], 0
+    for char in text:
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        if depth == 0 and char == ",":
+            pieces.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    pieces.append("".join(current))
+    return [piece.strip() for piece in pieces if piece.strip()]
+
+
 def _math_line(text: str) -> str:
     """One source line -> one or more aligned rows.
 
     `cat . dog = 1.0·0.9 + … = 0.90 + 0.02 + 0.12 = 1.04` is a chain of stages; printed as one
     row it wraps mid-expression and the working is lost. Each stage gets its own row, the
     `=` signs share a column, and a reader can follow the arithmetic down the page.
+
+    A line that defines several things — `q = h W_Q, k = h W_K, v = h W_V` — is not one chain:
+    read as a chain it becomes the rows `q | = h W_Q, k` and `| = h W_K, v`, which says the
+    opposite of what the model wrote. Split the definitions first, then each one into stages.
     """
-    stages = _split_stages(text.strip())
-    if not stages:
-        return ""
-    if len(stages) == 1:                       # a bare expression: one row, no sign
-        return (f'<span class="m-lhs"></span><span class="m-eq"></span>'
-                f'<span class="m-rhs">{_math(stages[0])}</span>')
-    rows = [(stages[0], stages[1])]
-    rows.extend(("", stage) for stage in stages[2:4])   # at most four stages per source line
-    if len(stages) > 4:                                 # keep the tail rather than drop it
-        rows[-1] = ("", " = ".join(stages[3:]))
-    return "".join(
-        f'<span class="m-lhs">{_math(lhs)}</span>'
-        f'<span class="m-eq">=</span>'
-        f'<span class="m-rhs">{_math(rhs)}</span>'
-        for lhs, rhs in rows)
+    text = text.strip()
+    pieces = _top_level_commas(text)
+    groups = pieces if sum(1 for piece in pieces if len(_split_stages(piece)) > 1) > 1 else [text]
+    out = []
+    for group in groups:
+        stages = _split_stages(group)
+        if not stages:
+            continue
+        if len(stages) == 1:                   # a bare expression: one row, no sign
+            out.append(f'<span class="m-lhs"></span><span class="m-eq"></span>'
+                       f'<span class="m-rhs">{_math(stages[0])}</span>')
+            continue
+        rows = [(stages[0], stages[1])]
+        rows.extend(("", stage) for stage in stages[2:4])   # at most four stages per source line
+        if len(stages) > 4:                                 # keep the tail rather than drop it
+            rows[-1] = ("", " = ".join(stages[3:]))
+        out.append("".join(
+            f'<span class="m-lhs">{_math(lhs)}</span>'
+            f'<span class="m-eq">=</span>'
+            f'<span class="m-rhs">{_math(rhs)}</span>'
+            for lhs, rhs in rows))
+    return "".join(out)
 
 
 _IDX_RE = re.compile(r"^\s*(?:\d+[.)]|[-\*•—–])\s*")
@@ -654,8 +697,9 @@ def _notice(spec: Dict[str, Any]) -> str:
                 'this course, so it comes from the model\'s own knowledge. The videos below were '
                 'checked for relevance, not for accuracy.</span></p>')
     if n < 3:
-        return (f'<p class="notice"><span>⚠</span><span><b>Thin sources:</b> only {n} source(s) survived '
-                'the research pass, so the advanced level is only partly grounded.</span></p>')
+        return (f'<p class="notice"><span>⚠</span><span><b>Thin sources:</b> only '
+                f'{_plural(n, "source")} survived the research pass, so the advanced level is '
+                'only partly grounded.</span></p>')
     return ""
 
 
@@ -680,24 +724,38 @@ def _dated(stamp: str) -> str:
 
 def _provenance_footer(spec: Dict[str, Any], identity: Dict[str, str]) -> str:
     prov = spec["provenance"]
+    n = len(prov["sources"])
     parts = []
-    if prov["finders"]:
-        parts.append("found with " + ", ".join(_TOOL_NAMES.get(f, f) for f in prov["finders"]))
-    if prov["readers"]:
-        parts.append("read with " + ", ".join(_TOOL_NAMES.get(r, r) for r in prov["readers"]))
-    parts.append(_plural(len(prov["sources"]), "source") + " read")
+    # A zero is not a provenance line. "0 sources read" under "How this course was made"
+    # reads as a machine failure leaked onto the page; say what actually happened instead.
+    if n:
+        if prov["finders"]:
+            parts.append("found with " + ", ".join(_TOOL_NAMES.get(f, f) for f in prov["finders"]))
+        if prov["readers"]:
+            parts.append("read with " + ", ".join(_TOOL_NAMES.get(r, r) for r in prov["readers"]))
+        parts.append(_plural(n, "source") + " read")
+    elif prov["finders"]:
+        parts.append("searched with " + ", ".join(_TOOL_NAMES.get(f, f) for f in prov["finders"]))
+        parts.append("nothing could be read")
+    else:
+        parts.append("written without a research pass")
+        parts.append("no outside sources were read")
     recommended = len(spec["resources"]["reading"])
     if recommended:
         parts.append(f"{recommended} recommended")
     vids = len(spec["resources"]["videos"])
     if vids:
-        parts.append(_plural(vids, "video"))
+        parts.append(_plural(vids, "video") + ("" if n else " (not checked for accuracy)"))
     if prov["failures"]:
-        parts.append(f'{len(prov["failures"])} dead end(s)')
-    line = " · ".join(parts) if parts else "no research pass ran"
+        parts.append(_plural(len(prov["failures"]), "dead end"))
     when = _dated(prov.get("generated") or "")
     if when:
-        line = f"{line} · made {when}"
+        parts.append(f"made {when}")
+    # Commas, not middots: a separator glyph that wraps to the next line reads as a stray
+    # mark, and no CSS rule can tell a wrapped item from a first one. A comma never opens a
+    # line, so the sentence stays clean at any width.
+    line = ", ".join(parts)
+    line = line[:1].upper() + line[1:] if line else line
     sources = ""
     if prov["sources"]:
         items = "".join(
@@ -1107,7 +1165,7 @@ ul.reading a{font-weight:500;text-decoration:none;border-bottom:1px solid color-
 .prov{margin-top:5rem;border-top:1px solid var(--line);padding:1.6rem 0 3.5rem;
   font-size:.84rem;color:var(--muted)}
 .prov .wrap{display:grid;gap:.2rem}
-.prov-line{font-family:var(--mono);font-size:.72rem;letter-spacing:.04em}
+.prov-line{font-family:var(--mono);font-size:.72rem;letter-spacing:.04em;max-width:60ch}
 .prov-design{margin-top:.7rem;font-family:var(--mono);font-size:.68rem;letter-spacing:.06em;
   text-transform:uppercase;color:var(--muted);opacity:.75}
 .prov-label{display:block;font-family:var(--mono);font-size:.66rem;letter-spacing:.13em;
@@ -1485,6 +1543,18 @@ _JS = """
 
 def render(spec: Dict[str, Any]) -> str:
     """Build the full HTML document for a validated course spec."""
+    prov = spec.get("provenance")
+    prov = prov if isinstance(prov, dict) else {}
+    sources = prov.get("sources")
+    sources = sources if isinstance(sources, list) else []
+    token = _CITE_LIMIT.set(min(40, len(sources)))
+    try:
+        return _render_page(spec)
+    finally:
+        _CITE_LIMIT.reset(token)
+
+
+def _render_page(spec: Dict[str, Any]) -> str:
     identity = tokens.resolve(spec.get("identity"))
     palette = tokens.PALETTES[identity["palette"]]
     pairing = tokens.TYPE_PAIRINGS[identity["type_pairing"]]
