@@ -21,7 +21,14 @@ except ImportError:  # direct import during development
 # --------------------------------------------------------------------------
 # inline markup: a deliberately small, escaped-first subset
 # --------------------------------------------------------------------------
-_TAG_RE = re.compile(r"<[^>]+>")
+# Only a known tag name is stripped. `<[^>]+>` also ate the middle of ordinary prose:
+# "if n < 3 and m > 5" lost "3 and m", and "x <= y >= z" became "x = z".
+_HTML_TAGS = (
+    "a|abbr|b|big|blockquote|br|center|cite|code|dd|del|div|dl|dt|em|font|h[1-6]|hr|i|iframe|"
+    "img|ins|kbd|li|mark|ol|p|pre|q|s|samp|script|small|span|strike|strong|style|sub|sup|"
+    "table|tbody|td|th|thead|tr|u|ul|var|wbr"
+)
+_TAG_RE = re.compile(r"</?(?:" + _HTML_TAGS + r")(?:\s[^<>]*)?/?>", re.I)
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _ITAL_RE = re.compile(r"(?<![\*\w])\*(?!\s)(.+?)(?<!\s)\*(?![\*\w])")
 _CODE_RE = re.compile(r"`([^`]+)`")
@@ -30,15 +37,14 @@ _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _CITE_RE = re.compile(r"\[(\d{1,2})\](?!\()")
 
 
-_CODE_SENTINEL = "\x00code{}\x00"
-
 # ---- math tokens in ordinary prose and figure labels -------------------------------
 # `W_Q` is a subscript; `web_search` is an identifier. The difference is the base: one
 # letter (or a chemical-style `H_2O`) is math, a multi-letter base is a word with an
 # underscore in it. These run in prose, steps, comparison cells and flow labels, where
 # `_scripts(aggressive=True)` would mangle identifiers.
 _BARE_SCRIPT_RE = re.compile(
-    r"(?<![\w])([A-Za-z])_(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3})(?![\w])")
+    r"(?<![\w])([A-Za-z])_(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3})"
+    r"(?:\^(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3}))?(?![\w])")
 _BARE_FORMULA_RE = re.compile(r"([A-Z])_([0-9]{1,2})(?![a-z])")   # H_2O, C_6H_12, H_12
 _BARE_CARET_RE = re.compile(
     r"(?<![\w])([A-Za-z0-9])\^(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3})(?![\w])")
@@ -52,12 +58,24 @@ def _wrap_script(tag: str, match: re.Match) -> str:
     return f"{match.group(1)}<{tag}>{match.group(2).strip('{}')}</{tag}>"
 
 
+def _wrap_sub_sup(match: re.Match) -> str:
+    """`W_Q^T` -> W<sub>Q</sub><sup>T</sup> in one pass.
+
+    Two passes could not do it: after the subscript pass the character before `^` is `>`,
+    so the caret rule never fired and prose kept a literal "^T".
+    """
+    out = _wrap_script("sub", match)
+    if match.group(3):
+        out += f"<sup>{match.group(3).strip('{}')}</sup>"
+    return out
+
+
 def _bare_scripts(text: str) -> str:
     """`W_Q` -> W<sub>Q</sub>, `K^T` -> K<sup>T</sup>, `H_2O` -> H<sub>2</sub>O."""
     text = _PAREN_SUPER_RE.sub(lambda m: f"{m.group(1)}<sup>{m.group(2)}</sup>", text)
     text = _PLAIN_SQRT_RE.sub(lambda m: f"√({m.group(1)})", text)
     text = _BARE_FORMULA_RE.sub(lambda m: _wrap_script("sub", m), text)
-    text = _BARE_SCRIPT_RE.sub(lambda m: _wrap_script("sub", m), text)
+    text = _BARE_SCRIPT_RE.sub(_wrap_sub_sup, text)
     return _BARE_CARET_RE.sub(lambda m: _wrap_script("sup", m), text)
 
 
@@ -93,27 +111,32 @@ def _scripts(text: str, *, aggressive: bool = False) -> str:
 
 def _inline(text: str) -> str:
     """Escape everything, then apply the tiny markup subset. Never emits raw HTML."""
+    staging: list = []
+
+    def _stash(markup: str) -> str:
+        staging.append(markup)
+        return "\x00hold{}\x00".format(len(staging) - 1)
+
     raw = html.escape(_TAG_RE.sub("", text or ""), quote=False)
     # code spans are literal: hold them aside so no other rule rewrites their bytes
-    held: list = []
-
-    def _hold(match: re.Match) -> str:
-        held.append(match.group(1))
-        return _CODE_SENTINEL.format(len(held) - 1)
-
-    raw = _CODE_RE.sub(_hold, raw)
-    out = _LINK_RE.sub(
-        lambda m: f'<a href="{html.escape(m.group(2), quote=True)}" rel="noopener noreferrer" '
-                  f'target="_blank">{m.group(1)}</a>', raw)
-    out = _CITE_RE.sub(r'<sup class="cite"><a href="#src-\1">\1</a></sup>', out)
+    raw = _CODE_RE.sub(lambda m: _stash(f"<code>{m.group(1)}</code>"), raw)
+    out = _CITE_RE.sub(r'<sup class="cite"><a href="#src-\1">\1</a></sup>', raw)
     out = _BOLD_RE.sub(r"<strong>\1</strong>", out)
     out = _ITAL_RE.sub(r"<em>\1</em>", out)
+    # links next, and the anchor is held like a code span: the prose math rules used to run
+    # inside the href and turn `https://example.com/a_b` into `/a<sub>b</sub>`
+    def _link(match: re.Match) -> str:
+        label = _scripts(_bare_scripts(_detex(match.group(1))), aggressive=False)
+        return _stash(f'<a href="{html.escape(match.group(2), quote=True)}" '
+                      f'rel="noopener noreferrer" target="_blank">{label}</a>')
+
+    out = _LINK_RE.sub(_link, out)
     # math that turns up outside a `math` block (figure labels, a prose sentence that
     # mentions W_Q) gets the same sub/sup treatment, plus LaTeX glyphs if it slipped in
     out = _bare_scripts(_detex(out))
     out = _scripts(out, aggressive=False)
-    for index, code in enumerate(held):
-        out = out.replace(_CODE_SENTINEL.format(index), f"<code>{code}</code>")
+    for index, markup in enumerate(staging):
+        out = out.replace("\x00hold{}\x00".format(index), markup)
     return out
 
 
@@ -271,7 +294,8 @@ def _fmt_duration(seconds: Any) -> str:
 def _spoken_label(text: str) -> str:
     """How a figure step is read aloud: `W_Q` is "W sub Q", not "W underscore Q"."""
     out = re.sub(r"(?<![\w])sqrt\s*\(", "√(", str(text or ""))
-    out = re.sub(r"[_^]\{?([^}\s]{1,12})\}?",
+    # the group excludes `_`/`^` so `W_Q^T` is read as two scripts, not "sub Q^T"
+    out = re.sub(r"[_^]\{?([^}\s_^]{1,12})\}?",
                  lambda m: (" sup " if m.group(0)[0] == "^" else " sub ") + m.group(1), out)
     return re.sub(r"\s+", " ", out).strip()
 
@@ -337,7 +361,9 @@ def _block(block: Dict[str, Any]) -> str:
 def _figure(spec: Dict[str, Any]) -> str:
     kind = str(spec.get("type") or "").strip().lower()
     if kind == "flow":
-        steps = [str(s).strip() for s in (spec.get("steps") or [])][:7]
+        raw_steps = spec.get("steps")
+        raw_steps = raw_steps if isinstance(raw_steps, list) else []
+        steps = [str(s).strip() for s in raw_steps][:7]
         steps = [s for s in steps if s]
         if len(steps) < 2:
             return ""
@@ -355,7 +381,9 @@ def _figure(spec: Dict[str, Any]) -> str:
                 f' role="img" aria-label="Trajectory of {n}"></canvas>')
     if kind in {"bars", "line"}:
         points = []
-        for raw in (spec.get("points") or [])[:24]:
+        raw_points = spec.get("points")
+        raw_points = raw_points if isinstance(raw_points, list) else []
+        for raw in raw_points[:24]:
             if not isinstance(raw, dict):
                 continue
             value = raw.get("value")
@@ -376,10 +404,16 @@ def _figure(spec: Dict[str, Any]) -> str:
 # --------------------------------------------------------------------------
 # exercise
 # --------------------------------------------------------------------------
-def _exercise(ex: Dict[str, Any], index: int) -> str:
+def _exercise(ex: Dict[str, Any], index: int, section_id: str = "") -> str:
+    """One exercise. `data-ex` is the section id, not its position.
+
+    Answers are persisted per course; an index key tied a saved answer to whatever section
+    happened to land in that slot after a rebuild reordered them.
+    """
     if not ex:
         return ""
     kind = ex["kind"]
+    key = section_id or str(index)
     slug_attr = f'data-kind="{kind}"'
     if kind == "mcq":
         choices = "".join(
@@ -402,7 +436,7 @@ def _exercise(ex: Dict[str, Any], index: int) -> str:
             f'<div class="feedback" aria-live="polite" data-rubric="{rubric_attr}"></div>'
             f'<div class="ex-answer" hidden>{_paras(ex.get("answer", ""))}</div>'
         )
-    return (f'<section class="ex" {slug_attr} data-ex="{index}">'
+    return (f'<section class="ex" {slug_attr} data-ex="{html.escape(key, quote=True)}">'
             f'<div class="ex-head"><span class="ex-label">Exercise {index:02d}</span>'
             f'<span class="ex-kind">{"multiple choice" if kind == "mcq" else "recall"}</span></div>'
             f'<p class="ex-prompt">{_inline(ex["prompt"])}</p>{body}</section>')
@@ -431,7 +465,8 @@ def _section(section: Dict[str, Any], index: int) -> str:
     return (f'<section class="sec" id="{section["id"]}" data-idx="{index}">'
             f'<header class="sec-head">{eyebrow}'
             f'<h2>{_inline(section["title"])}</h2>{hook}</header>'
-            f"{visual}{levels}{_exercise(section.get('exercise'), index)}{ask}</section>")
+            f"{visual}{levels}{_exercise(section.get('exercise'), index, section['id'])}{ask}"
+            f"</section>")
 
 
 # --------------------------------------------------------------------------
@@ -445,6 +480,12 @@ def _notice(spec: Dict[str, Any]) -> str:
         return ('<p class="notice"><span>⚠</span><span><b>Unresearched.</b> Nothing here was checked '
                 'against an outside source — it comes from the model\'s own knowledge. Where the '
                 'advanced level says something is proved, treat it as a claim to verify.</span></p>')
+    if n == 0:
+        # a videos-only course retrieved something, but nothing was read: "0 source(s)" under a
+        # "thin sources" heading reads like a bug rather than a warning
+        return ('<p class="notice"><span>⚠</span><span><b>No sources.</b> No page could be read for '
+                'this course, so it comes from the model\'s own knowledge. The videos below were '
+                'checked for relevance, not for accuracy.</span></p>')
     if n < 3:
         return (f'<p class="notice"><span>⚠</span><span><b>Thin sources:</b> only {n} source(s) survived '
                 'the research pass, so the advanced level is only partly grounded.</span></p>')
@@ -525,9 +566,10 @@ def _resources(spec: Dict[str, Any]) -> str:
         thumb = v.get("thumb_data") or ""
         image = (f'<img class="vthumb" src="{html.escape(thumb, quote=True)}" alt="" '
                  f'loading="lazy" decoding="async">' if thumb.startswith("data:image") else "")
+        level_attr = f' data-level="{html.escape(v["level"], quote=True)}"' if v["level"] else ""
         videos += (
             f'<button class="vcard" type="button" data-yt="{html.escape(v["id"], quote=True)}"'
-            f' data-level="{v["level"]}">'
+            f'{level_attr}>'
             f'<span class="vposter" aria-hidden="true">{image}'
             f'<span class="vplay"></span>'
             f'<span class="vdur">{dur}</span></span>'
@@ -541,7 +583,8 @@ def _resources(spec: Dict[str, Any]) -> str:
         label = _inline(r["title"] or r["href"])
         title_html = (f'<a href="{html.escape(r["href"], quote=True)}" rel="noopener noreferrer" '
                       f'target="_blank">{label}</a>' if r["href"] else f"<span>{label}</span>")
-        reading += (f'<li data-level="{r["level"]}">{title_html}'
+        read_level = f' data-level="{html.escape(r["level"], quote=True)}"' if r["level"] else ""
+        reading += (f'<li{read_level}>{title_html}'
                     f'<span class="rd-meta">{bits}</span>{why}</li>')
     return ('<section class="res-block" id="resources"><header class="sec-head">'
             '<span class="sec-eyebrow">Go further</span><h2>Watch and read next</h2>'
@@ -573,6 +616,9 @@ _CSS = """
   }
 }
 *,*::before,*::after{box-sizing:border-box}
+/* an author `display` beats the UA rule for [hidden]: without this, a filtered resource card
+   keeps its grid display and stays on screen */
+[hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--text);font-size:var(--fs);
   line-height:var(--lh);font-kerning:normal;font-variant-ligatures:common-ligatures;
@@ -913,6 +959,8 @@ ul.reading a{font-weight:500;text-decoration:none;border-bottom:1px solid color-
   a{color:#000;text-decoration:underline}
   a[href^="http"]::after{content:" (" attr(href) ")";font-size:8pt;color:#555;word-break:break-all}
   .lv{display:block!important;margin-bottom:1.3rem}
+  /* resources filtered to the screen depth come back for paper: the page prints all three */
+  .vcard[hidden],ul.reading li[hidden]{display:grid!important}
   .lv::before{content:attr(data-lab);display:block;font-weight:600;font-size:8.5pt;letter-spacing:.12em;
     text-transform:uppercase;color:#000!important;margin-bottom:.35rem;border-top:1px solid #999;padding-top:.4rem}
   .sec{page-break-inside:auto}
@@ -937,12 +985,28 @@ _JS = """
   var LEVELS={novice:1,intermediate:1,advanced:1};
   if(!LEVELS[state.level])state.level=root.dataset.level||'intermediate';
   function save(){try{store&&store.setItem(KEY,JSON.stringify(state))}catch(e){}}
+  /* resources are tagged with a depth; show the ones that match the depth on screen, and
+     fall back to all of them when nothing matches rather than showing an empty shelf */
+  function applyResourceLevels(level){
+    var cards=[].slice.call(document.querySelectorAll('.vcard, ul.reading li'))
+      .filter(function(c){return !!c.dataset.level});
+    if(!cards.length)return;
+    var any=cards.some(function(c){return c.dataset.level===level});
+    /* an untagged item is for every depth: it is never hidden */
+    cards.forEach(function(c){c.hidden=any&&c.dataset.level!==level});
+  }
   function applyLevel(level,persist){
     root.dataset.level=level;state.level=level;
     document.querySelectorAll('.seg button').forEach(function(b){
       b.setAttribute('aria-pressed',String(b.dataset.level===level));
     });
-    if(persist)save();
+    applyResourceLevels(level);
+    if(persist){
+      save();
+      refreshResume();
+      // canvases in a hidden level were sized from clientWidth 0; redraw the ones now visible
+      if(typeof draw==='function')draw();
+    }
   }
   document.querySelectorAll('.seg button').forEach(function(b){
     b.addEventListener('click',function(){applyLevel(b.dataset.level,true)});
@@ -1008,13 +1072,16 @@ _JS = """
   /* primary action: land on the first section you have not read */
   var startBtn=document.getElementById('start');
   var resume=document.getElementById('resume');
-  if(resume){
-    var seenN=Object.keys(state.seen).length;
-    if(seenN){
-      resume.hidden=false;
-      resume.textContent=seenN+' of '+secs.length+' sections opened · depth '+state.level;
-    }
+  function refreshResume(){
+    /* called from applyLevel too: the line names the depth, so it must not keep saying the
+       depth the page opened at after you switch */
+    if(!resume||!secs||!secs.length)return;
+    var count=Object.keys(state.seen).length;
+    if(!count)return;
+    resume.hidden=false;
+    resume.textContent=count+' of '+secs.length+' sections opened · depth '+state.level;
   }
+  refreshResume();
   if(startBtn){
     var unseen=secs.filter(function(s){return !state.seen[s.id]});
     var target=unseen[0]||secs[0];
@@ -1113,14 +1180,21 @@ _JS = """
   function send(prompt,cb){
     if(window.hermes&&typeof window.hermes.send==='function'){
       window.hermes.send(prompt).then(function(ack){cb(!!(ack&&ack.ok),ack&&ack.error||'error')});
-    }else{
-      try{navigator.clipboard&&navigator.clipboard.writeText(prompt)}catch(e){}
-      cb(false,'no bridge — copied to clipboard instead');
+      return;
     }
+    /* no bridge (plain file, or the desktop preview pane): the honest fallback is the
+       clipboard, and only the promise says whether the copy actually happened */
+    var clip=navigator.clipboard;
+    if(!clip||typeof clip.writeText!=='function'){cb(false,'no bridge and no clipboard');return}
+    try{
+      clip.writeText(prompt).then(
+        function(){cb(false,'no bridge — copied to clipboard')},
+        function(){cb(false,'no bridge and the clipboard refused')});
+    }catch(e){cb(false,'no bridge and no clipboard')}
   }
   document.querySelectorAll('[data-hermes-send]').forEach(function(b){
     b.addEventListener('click',function(){send(b.getAttribute('data-hermes-send'),function(ok,err){
-      if(!ok){b.textContent='Copied to clipboard';}
+      if(!ok){b.textContent=/copied/.test(err||'')?'Copied to clipboard':'Could not send ('+err+')'}
     })});
   });
   document.querySelectorAll('.ask-link').forEach(function(b){
@@ -1133,8 +1207,9 @@ _JS = """
         +'example, name the one thing most people get wrong here, and say what I should be able to '
         +'do after this section. Keep it under 200 words.').slice(0,490);
       var label=b.textContent;
-      send(p,function(ok){
-        b.textContent=ok?'Asked — see the chat':'Copied to your clipboard';
+      send(p,function(ok,err){
+        b.textContent=ok?'Asked — see the chat'
+          :(/copied/.test(err||'')?'Copied to your clipboard':'Could not send ('+err+')');
         setTimeout(function(){b.textContent=label;},2600);
       });
     });
@@ -1228,7 +1303,7 @@ _JS = """
 """
 
 
-def render(spec: Dict[str, Any], *, mode: str = "auto") -> str:
+def render(spec: Dict[str, Any]) -> str:
     """Build the full HTML document for a validated course spec."""
     identity = tokens.resolve(spec.get("identity"))
     palette = tokens.PALETTES[identity["palette"]]

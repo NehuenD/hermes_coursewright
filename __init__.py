@@ -19,23 +19,28 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
 try:  # loaded as a package by the plugin loader
     from . import author, render as renderer, research as research_mod, spec as specmod
+    from . import tokens as tokenmod
 except ImportError:  # direct import during development
     import author  # type: ignore
     import render as renderer  # type: ignore
     import research as research_mod  # type: ignore
     import spec as specmod  # type: ignore
+    import tokens as tokenmod  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 _PLUGIN_DIR = Path(__file__).parent
 _SAMPLES = _PLUGIN_DIR / "samples"
-_MAX_SECTIONS_BUILT = 7
+# The planner is allowed eight sections, so the builder must allow eight too: capping the
+# build at seven silently dropped the closing section every plan was told to write.
+_MAX_SECTIONS_BUILT = 8
 
 # Slash commands get 30 s; a build takes minutes. Builds run on worker threads, one per topic.
 _BUILD_LOCK = threading.Lock()
@@ -44,6 +49,11 @@ _ACTIVE: dict = {}
 # agent turn, or a background fallback thread). Two concurrent builds of one topic would race
 # for the same store directory, so the second is refused instead of half-overwriting the first.
 _RUNNING: set = set()
+# Topic keys handed to the agent by /course that have not reached the tool yet. Without this
+# the guard has a gap: /course hands the work off in a few milliseconds, but nothing owns the
+# topic until the agent's turn calls the tool, so two quick /course calls both dispatched.
+_HANDOFFS: dict = {}
+_HANDOFF_TTL = 15 * 60
 
 
 def _claim_build(key: str) -> bool:
@@ -58,6 +68,25 @@ def _claim_build(key: str) -> bool:
 def _release_build(key: str) -> None:
     with _BUILD_LOCK:
         _RUNNING.discard(key)
+        _HANDOFFS.pop(key, None)
+
+
+def _note_handoff(key: str) -> None:
+    """Record that /course handed *key* to the agent, so a second /course is refused."""
+    with _BUILD_LOCK:
+        _HANDOFFS[key] = time.monotonic()
+
+
+def _handoff_pending(key: str) -> bool:
+    """True while a handed-off build for *key* has not reached the tool yet."""
+    with _BUILD_LOCK:
+        started = _HANDOFFS.get(key)
+        if started is None:
+            return False
+        if time.monotonic() - started > _HANDOFF_TTL:  # the agent never ran it
+            _HANDOFFS.pop(key, None)
+            return False
+        return True
 
 PLAN_SCHEMA = {
     "name": "coursewright_plan",
@@ -132,12 +161,21 @@ def _store() -> Path:
 
 
 def _guess_language(topic: str, explicit: str) -> str:
-    """Follow the prompt's language: a Spanish-looking topic writes a Spanish course."""
+    """Follow the prompt's language: a Spanish-looking topic writes a Spanish course.
+
+    One shared function word is not evidence — "de Broglie wavelength" is French, "la Niña"
+    and "es Vedra" are English-language topics. Accents settle it; otherwise Spanish needs two
+    markers and at least one that English rarely uses as a word.
+    """
     if explicit:
         return explicit.strip()[:12]
     if re.search(r"[ñáéíóú¿¡]", topic, re.I):
         return "es"
-    if re.search(r"\b(el|la|los|las|de|que|como|cómo|por|para|una?|y|es)\b", topic.lower()):
+    words = set(re.findall(r"[a-záéíóúñ]+", (topic or "").lower()))
+    markers = {"el", "la", "los", "las", "un", "una", "de", "del", "que", "qué", "como",
+               "cómo", "por", "para", "es", "son", "y", "en", "con"}
+    strong = {"que", "qué", "como", "cómo", "para", "del", "los", "las", "es", "son", "y"}
+    if len(words & markers) >= 2 and words & strong:
         return "es"
     return "en"
 
@@ -187,16 +225,13 @@ def make_plan(ctx, args: dict) -> dict:
     level = str(args.get("level") or ctx.get_config("default_level", default="intermediate"))
     language = _guess_language(topic, str(args.get("language") or ""))
 
-    last_identity = None
-    try:
-        last_identity = ctx.state.get("last_identity", default=None)
-    except Exception:
-        pass
-
     plan = author.plan_course(ctx, topic=topic, level=level, language=language,
-                              avoid_identity=last_identity if isinstance(last_identity, dict) else None,
+                              # The identity is assigned here to keep the course set visually
+                              # varied; asking the model to both use it and avoid the last one
+                              # put two contradictory instructions in the same prompt.
+                              avoid_identity=None,
                               sections=_as_int(args.get("max_sections")),
-                              forced_identity=tokens.assign(
+                              forced_identity=tokenmod.assign(
                                   [row["identity"] for row in _inventory() if row.get("identity")]))
     plan["default_level"] = level
     plan["requested_topic"] = topic
@@ -318,20 +353,24 @@ def _build_course(ctx, args: dict) -> dict:
 
         record = None
         picks: dict = {"videos": [], "reading": []}
-        if ctx.get_config("enable_research", default=True):
-            want_videos = ctx.get_config("enable_videos", default=True)
+        # Research and videos are separate switches: a course with enable_research off but
+        # enable_videos on still gets its watch list, so the two settings do not quietly
+        # disable each other.
+        want_research = bool(ctx.get_config("enable_research", default=True))
+        want_videos = bool(ctx.get_config("enable_videos", default=True))
+        if want_research or want_videos:
             queries = author.video_queries(ctx, topic or plan.get("title") or "course", plan) \
                 if want_videos else None
             record = research_mod.gather(
                 ctx,
                 topic=topic or plan.get("title") or "course",
                 language=language,
-                caps={"max_sources": ctx.get_config("max_sources", default=12),
+                caps={"max_sources": ctx.get_config("max_sources", default=12) if want_research else 0,
                       "max_videos": ctx.get_config("max_videos", default=6) if want_videos else 0,
                       "timeout": 150},
                 cache_dir=_store() / "cache",
                 force=bool(args.get("refresh")),
-                want_videos=bool(want_videos),
+                want_videos=want_videos,
                 video_queries=queries,
             )
             picks = author.pick_resources(ctx, plan, record)
@@ -346,9 +385,20 @@ def _build_course(ctx, args: dict) -> dict:
         raw["default_level"] = args["level"]
 
     clean, warnings = specmod.validate(raw)
-    clean["provenance"].setdefault("generated", _now())
+    if not clean.get("provenance", {}).get("generated"):
+        # validate always emits the key, so setdefault never fired: a course built with
+        # research off shipped without a date
+        clean["provenance"]["generated"] = _now()
     if origin == "model":
         clean["provenance"]["generated_by"] = "coursewright M2"
+
+    # A page with a cover and no sections is not a course. Refusing here keeps a broken spec
+    # from being recorded as a successful build.
+    if not clean.get("sections"):
+        return {"ok": False,
+                "warnings": warnings,
+                "error": ("the spec produced no renderable sections"
+                          + (f" ({warnings[0]})" if warnings else ""))}
 
     # One course per topic. The model names its own slug per build, so the same topic
     # used to land in a new directory every time; an existing course for this topic wins.
@@ -379,7 +429,7 @@ def _build_course(ctx, args: dict) -> dict:
         except OSError as exc:
             warnings.append(f"mirror copy failed: {exc}")
 
-    identity = renderer.tokens.resolve(clean.get("identity"))
+    identity = tokenmod.resolve(clean.get("identity"))
     try:
         ctx.state.set("last_identity", identity)
     except Exception:
@@ -495,7 +545,8 @@ def course_status(ctx, args: dict) -> dict:
         "research_cache_entries": _count("cache/*.json"),
         "store": str(_store()),
     }
-    if isinstance(last, dict) and not last.get("ok"):
+    # ok is None while a build is handed off or in flight; only an explicit False is a failure
+    if isinstance(last, dict) and last.get("ok") is False:
         payload["hint"] = ("The last build failed. Re-run with the same topic; a failure here is "
                            "recorded with its exception, not swallowed.")
     return payload
@@ -536,7 +587,7 @@ def _selfcheck() -> None:
                          "answer": 0, "why": "w"},
         }],
     }
-    page = render.render(probe)
+    page = renderer.render(probe)
     for needle in ("<!doctype html", 'class="seg"', "src-1"):
         if needle not in page.lower() and needle not in page:
             raise RuntimeError(f"renderer output missing {needle!r}")
@@ -546,20 +597,24 @@ _LEVELS = ("novice", "intermediate", "advanced")
 
 
 def _parse_course_args(raw_args: str) -> dict:
-    """`/course how a zipper works --level=novice 6` -> the args dict build_course expects."""
+    """`/course how a zipper works --level=novice --sections=6` -> the args build_course expects.
+
+    A bare number is never a section count: `/course how 7 bridges of Königsberg work` used to
+    lose its "7" from the topic and ask for seven sections.
+    """
     args: dict = {}
     words: list = []
     for token in (raw_args or "").split():
         if token.startswith("--level="):
-            args["level"] = token.split("=", 1)[1].strip().lower()
+            level = token.split("=", 1)[1].strip().lower()
+            if level in _LEVELS:
+                args["level"] = level
         elif token.startswith("--lang="):
             args["language"] = token.split("=", 1)[1]
         elif token.startswith("--sections="):
             args["max_sections"] = _as_int(token.split("=", 1)[1])
         elif token in {"--refresh", "-r"}:
             args["refresh"] = True
-        elif token.isdigit():
-            args["max_sections"] = int(token)
         elif not token.startswith("-"):
             words.append(token)
     if words:  # the topic is the whole phrase, not its first word
@@ -667,7 +722,11 @@ def register(ctx) -> None:
             running = _ACTIVE.get(key)
             building = running is not None and running.is_alive()
             in_flight = key in _RUNNING
-        if building or in_flight:
+            pending_handoff = _HANDOFFS.get(key) is not None
+        if pending_handoff:
+            # a handed-off build may not have reached the tool yet; ask the honest question
+            pending_handoff = _handoff_pending(key)
+        if building or in_flight or pending_handoff:
             return (f"Already building **{topic}**. It will appear here when it lands, "
                     f"or run `/courses` in a few minutes.")
 
@@ -684,6 +743,7 @@ def register(ctx) -> None:
                 logger.warning("coursewright: could not hand %r to the agent: %s", topic, exc)
         if handed_off:
             logger.info("coursewright: /course handed %r to the agent", topic)
+            _note_handoff(key)
             _record_build({"ok": None, "running": True, "handed_to_agent": True,
                            "topic": topic, "args": dict(args)})
             return (f"On it — building \"{topic}\" at {_level_of(args)} depth as the next turn, so "

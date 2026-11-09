@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +155,13 @@ def _load_cache(cache_dir, topic: str, language: str, **caps) -> Optional[dict]:
         if not path.exists() or time.time() - path.stat().st_mtime > CACHE_TTL_SECONDS:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("sources") is not None:
-            data["cached"] = True
-            return data
+        if not isinstance(data, dict) or data.get("sources") is None:
+            return None
+        # a record with nothing in it is an outage that got cached, not a result
+        if not data.get("sources") and not data.get("videos"):
+            return None
+        data["cached"] = True
+        return data
     except Exception:
         pass
     return None
@@ -272,7 +276,7 @@ def _digest(text: str, limit: int = 800) -> str:
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text or "")
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"[*_`#>|]+", " ", text)
+    text = _demark(text)
     text = re.sub(r"\s+", " ", text)
     picked, total = [], 0
     for sentence in _sentences(text):
@@ -281,6 +285,19 @@ def _digest(text: str, limit: int = 800) -> str:
         if total >= limit:
             break
     return " ".join(picked)[:limit]
+
+
+def _demark(text: str) -> str:
+    """Drop markdown syntax without eating the maths.
+
+    The old blanket `[*_`#>|]+` turned "n -> n/2" into "n - n/2" and "3n + 1 > n" into
+    "3n + 1 n": excerpts are handed to the writer, so a lost ">" flips an inequality. Only
+    line-leading markers (headings, blockquotes) are syntax; a ">" or "#" mid-sentence is not.
+    """
+    text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", " ", text or "")
+    text = re.sub(r"(?m)^[ \t]{0,3}>[ \t]?", " ", text)
+    text = re.sub(r"[*_`|]+", " ", text)
+    return text
 
 
 def _dedupe_key(source: Dict[str, str]) -> str:
@@ -299,6 +316,7 @@ def _clean(text: str, limit: int = 900) -> str:
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text or "")
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"<[^>]+>", " ", text)
+    text = _demark(text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]
 
@@ -416,16 +434,23 @@ def _content_words(text: str) -> set:
     return {word for word in re.findall(r"[a-z]{4,}", (text or "").lower()) if word not in _STOPWORDS}
 
 
-def _on_topic(video: Dict[str, Any], wanted: set, minimum: int = 2) -> bool:
+def _on_topic(video: Dict[str, Any], topic_words: Set[str], query_words: Optional[Set[str]] = None,
+              minimum: int = 2) -> bool:
     """A video is kept only if it shares enough vocabulary with what we searched for.
 
     Without this, "how a garbage collector finds live objects" returns footage of bin lorries.
+    Sharing one word with the *topic itself* is enough ("Collatz" is the whole signal); the
+    generic words the query templates add ("explained", "open problems") are not evidence, so
+    they only count in pairs.
     """
-    if not wanted:
+    query_words = query_words or set()
+    if not topic_words and not query_words:
         return True
     haystack = _content_words(f"{video.get('title', '')} {video.get('description', '')} "
                               f"{video.get('channel', '')}")
-    return len(haystack & wanted) >= minimum
+    if topic_words and (haystack & topic_words):
+        return True
+    return len(haystack & query_words) >= minimum
 
 
 def _queries(topic: str) -> List[str]:
@@ -441,8 +466,9 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
            video_queries: Optional[List[str]] = None) -> Dict[str, Any]:
     """Run the ladder. Returns a research record; never raises."""
     caps = caps or {}
-    max_sources = int(caps.get("max_sources") or 12)
-    max_videos = int(caps.get("max_videos") or 6)
+    # an explicit 0 means "off": `or` turned max_videos=0 into 6, both here and in the cache key
+    max_sources = int(caps["max_sources"]) if caps.get("max_sources") is not None else 12
+    max_videos = int(caps["max_videos"]) if caps.get("max_videos") is not None else 6
     deadline = time.monotonic() + float(caps.get("timeout") or 150)
 
     if cache_dir and not force:
@@ -458,7 +484,9 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
         "failures": [], "warnings": [], "fetched_at": _now(),
     }
 
-    web_ok = probe_web(ctx)
+    # a build with research off still wants its videos: max_sources == 0 means "do not read"
+    want_sources = max_sources > 0
+    web_ok = probe_web(ctx) if want_sources else False
     if web_ok:
         record["finders"].append("web_search")
 
@@ -480,10 +508,10 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
                 candidates.append(result)
         candidates.sort(key=_score, reverse=True)
         candidates = candidates[: max_sources + 4]
-    else:
+    elif want_sources:
         record["failures"].append("web search backend: no results (nothing configured, or it is down)")
 
-    if len(candidates) < 4:
+    if want_sources and len(candidates) < 4:
         # keyless rungs: wikipedia / arxiv / stackexchange, all without credentials
         seen_urls = {item["url"] for item in candidates}
         for name, found in _keyless_find(topic, language):
@@ -499,7 +527,7 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
     # read
     read_count = 0
     seen_keys: set = set()
-    for index, candidate in enumerate(candidates):
+    for index, candidate in enumerate(candidates if want_sources else []):
         if read_count >= max_sources or time.monotonic() > deadline:
             break
         text = _extract(ctx, [candidate["url"]])
@@ -533,10 +561,13 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
         if "yt-dlp" not in record["finders"]:
             record["finders"].append("yt-dlp")
         found = _yt_search(topic, max_videos, queries=video_queries)
-        wanted = set()
-        for query in (video_queries or _queries(topic)):
-            wanted |= _content_words(query)
-        kept = [video for video in found if _on_topic(video, wanted)]
+        # the topic's own words are the strongest signal; the query words only help when the
+        # model-supplied queries are specific (the template queries add generic filler)
+        topic_words = _content_words(topic)
+        query_words: set = set()
+        for query in (video_queries or []):
+            query_words |= _content_words(query)
+        kept = [video for video in found if _on_topic(video, topic_words, query_words)]
         dropped = len(found) - len(kept)
         if dropped:
             record["warnings"].append(
@@ -556,10 +587,12 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
 
     # "researched" means something real was retrieved, not that a backend was configured
     record["researched"] = bool(record["sources"] or record["videos"])
-    if len(record["sources"]) < 3:
+    if want_sources and len(record["sources"]) < 3:
         record["warnings"].append(
             f"only {len(record['sources'])} source(s) could be read; the advanced level is lightly grounded")
-    if cache_dir:
+    # An empty run is an outage, not a result: caching it served "0 sources" to every rebuild
+    # for a week, long after the backend recovered. _load_cache ignores such records too.
+    if cache_dir and (record["sources"] or record["videos"]):
         _save_cache(cache_dir, topic, language, record, want_videos=want_videos,
                     max_videos=max_videos, max_sources=max_sources)
     logger.info("coursewright research: %d sources, %d videos, %d failures",
@@ -575,15 +608,4 @@ def source_block(record: Optional[Dict[str, Any]], limit: int = 8) -> str:
     for source in record["sources"][:limit]:
         lines.append(f"[{source['id']}] {source['title']} ({source['domain']})\n"
                      f"    {source['excerpt'][:520]}")
-    return "\n".join(lines)
-
-
-def video_block(record: Optional[Dict[str, Any]]) -> str:
-    if not record or not record.get("videos"):
-        return ""
-    lines = []
-    for video in record["videos"]:
-        minutes = round((video.get("duration") or 0) / 60)
-        caps = "captions" if video.get("transcript") else "no captions"
-        lines.append(f"- {video['id']} | {video['title']} | {video['channel']} | ~{minutes} min | {caps}")
     return "\n".join(lines)

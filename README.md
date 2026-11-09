@@ -28,7 +28,7 @@ coursewright_build(plan_path=".../plans/x.json")       write from a saved plan
 coursewright_build(spec_path=".../course.json")        render an existing spec
 coursewright_list()                                    courses on disk
 coursewright_status()                                  last build, ok or failed
-/course <topic> [--level=novice|intermediate|advanced] [--lang=es] [--sections=6]
+/course <topic> [--level=novice|intermediate|advanced] [--lang=es] [--sections=N]
 /courses [slug]
 ```
 
@@ -61,7 +61,8 @@ copy in `~/Courses/<slug>/`, with the spec and the research record beside the pa
 | fallback | Wikipedia, arXiv, Stack Exchange | sources when search returns nothing, no key needed |
 
 A four section course costs one plan call and four draft calls, takes about five minutes on
-a laptop, and produces a page near 95 KB with posters inlined.
+a laptop, and produces a page near 95 KB with posters inlined. The planner is asked for 6-8
+sections and the builder keeps all eight: the closing section a plan asks for is not dropped.
 
 ## Configuration
 
@@ -92,7 +93,11 @@ a laptop, and produces a page near 95 KB with posters inlined.
   printing it. A multi-letter base (`web_search`) is left alone: it is an identifier.
 - Print drops the rail, the depth bar, the buttons and the video posters, turns dark cards
   into outlined boxes, labels each level, and appends the URL after every link.
-- Progress, depth and answers persist in `localStorage` under `coursewright:<slug>`.
+- Videos and reading are tagged with a depth and the page shows the ones for the depth you
+  are reading; items that carry no depth are always shown, and when nothing matches the
+  current depth the whole list is shown rather than an empty shelf.
+- Progress, depth and answers persist in `localStorage` under `coursewright:<slug>`. Answers
+  are keyed by section id, so a rebuild that reorders sections does not move them.
 
 ## What it will not do
 
@@ -104,6 +109,9 @@ a laptop, and produces a page near 95 KB with posters inlined.
   list, which names each domain.
 - A model that calls a blog post a paper gets corrected, and a year survives only when it
   appears in the source text.
+- A figure whose shape makes no sense (`steps` that is not a list, one bar) is dropped with
+  a build note instead of taking the whole render down with it.
+- Comparisons in prose survive: `n < 3`, `a >= b` and `Vec<T>` are text, not tags.
 - The relevance filter drops a video about the wrong sense of the topic, and the build
   note reports how many it dropped.
 
@@ -111,8 +119,8 @@ a laptop, and produces a page near 95 KB with posters inlined.
 
 - The page can send a message only where the host injects `window.hermes` — the chat's
   inline preview frame. Opened as a plain file or in the desktop's preview pane (an
-  Electron webview with no bridge), the ask buttons copy the question to the clipboard
-  instead.
+  Electron webview with no bridge), the ask buttons fall back to the clipboard, and say
+  plainly when the copy was refused instead of claiming it worked.
 - Progress, depth and answers persist through `localStorage` under `coursewright:<slug>`
   wherever the page has a real origin: opened as a file, and in the desktop preview pane
   (measured). An opaque-origin frame has no storage, so there the page runs stateless.
@@ -143,6 +151,7 @@ a laptop, and produces a page near 95 KB with posters inlined.
 | `spec.py` | spec validation and the closed block set |
 | `render.py` | the page: HTML, CSS, JS, figures, print rules |
 | `tokens.py` | the design token space and identity assignment |
+| `tests/` | regression tests for validation, rendering, research and the commands |
 | `samples/collatz.json` | a real six section course, three depths per section |
 
 ## Verify
@@ -150,6 +159,7 @@ a laptop, and produces a page near 95 KB with posters inlined.
 ```bash
 hermes plugins doctor .
 hermes plugins validate .
+python3 -m unittest discover -s tests -t .   # regression tests, no network
 ```
 
 ## License

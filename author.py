@@ -414,7 +414,9 @@ def draft_section(ctx, plan: Dict[str, Any], index: int, *, language: str = "en"
         return draft_section(ctx, plan, index, language=language, sources=sources,
                              retry_errors=problems)
     if problems:
-        section.setdefault("_warnings", []).extend(problems)
+        # numbered, so the assembler can clear exactly the note its own repair resolved
+        section.setdefault("_warnings", []).extend(
+            f"section {index + 1}: {problem}" for problem in problems)
     return section
 
 
@@ -695,8 +697,11 @@ def assemble(plan: Dict[str, Any], sections: List[Dict[str, Any]], *, topic: str
         if _flow_from_steps(clean_section):
             logger.info("coursewright: drew a flow figure for %s from its steps block",
                         clean_section.get("id"))
-            # the missing-figure complaint is resolved by the figure we just drew
-            warnings = [w for w in warnings if "no figure" not in w]
+            # the missing-figure complaint is resolved by the figure we just drew — and only
+            # that section's complaint, not every section's
+            prefix = f"section {len(clean_sections) + 1}: "
+            warnings = [w for w in warnings
+                        if not (w.startswith(prefix) and "no figure" in w)]
         clean_sections.append(clean_section)
 
     record = research or {}

@@ -160,14 +160,3 @@ def resolve(identity: Any) -> Dict[str, str]:
         if isinstance(value, str) and value.strip().lower() in table[key]:
             out[key] = value.strip().lower()
     return out
-
-
-def identity_variants() -> Dict[str, int]:
-    """How many combinations the space allows (for the docs and the model prompt)."""
-    return {
-        "palettes": len(PALETTES),
-        "type_pairings": len(TYPE_PAIRINGS),
-        "layouts": len(LAYOUTS),
-        "motions": len(MOTIONS),
-        "total": len(PALETTES) * len(TYPE_PAIRINGS) * len(LAYOUTS) * len(MOTIONS),
-    }

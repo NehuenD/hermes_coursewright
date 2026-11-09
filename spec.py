@@ -33,11 +33,64 @@ def _s(value: Any, limit: int = 4000) -> str:
     return str(value)[:limit]
 
 
+def _list(value: Any) -> list:
+    """A list, or [] — never a slice of a dict/str.
+
+    `(raw.get("sources") or [])[:40]` raised KeyError on a dict, which broke this module's
+    one promise: validation never raises on bad content.
+    """
+    return value if isinstance(value, list) else []
+
+
+def _items(value: Any, limit: int) -> list:
+    return _list(value)[:limit]
+
+
 def _safe_url(value: Any, limit: int = 800) -> str:
     """Only http(s) survives: these become `href` attributes in the rendered page, and a
     model-supplied `javascript:` URL is an executable attribute, not a citation."""
     url = _s(value, limit).strip()
     return url if re.match(r"^https?://", url, re.I) else ""
+
+
+_FIGURE_TYPES = {"flow", "bars", "line", "trajectory"}
+
+
+def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[str, Any]:
+    """Normalise a figure so the renderer can index it without checking anything.
+
+    `{"type": "flow", "steps": 3}` used to reach `render._figure` and raise TypeError after a
+    full build had already been paid for, so the shapes are settled here.
+    """
+    kind = _s(spec.get("type"), 20).strip().lower()
+    if kind not in _FIGURE_TYPES:
+        if kind:
+            warnings.append(f"{where}: dropped figure of unknown type {kind!r}")
+        return {}
+    if kind == "flow":
+        steps = [_s(s, 60).strip() for s in _list(spec.get("steps"))][:7]
+        steps = [s for s in steps if s]
+        if len(steps) < 2:
+            warnings.append(f"{where}: dropped flow figure with fewer than two steps")
+            return {}
+        return {"type": "flow", "steps": steps}
+    if kind == "trajectory":
+        n = spec.get("n")
+        n = n if isinstance(n, int) and not isinstance(n, bool) else 27
+        return {"type": "trajectory", "n": max(3, min(n, 97))}
+    points = []
+    for raw in _list(spec.get("points"))[:24]:
+        if not isinstance(raw, dict):
+            continue
+        value = raw.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        points.append({"label": _s(raw.get("label"), 18), "value": float(value)})
+    if len(points) < 2:
+        warnings.append(f"{where}: dropped {kind} figure with fewer than two numeric points")
+        return {}
+    return {"type": kind, "points": points,
+            "xlabel": _s(spec.get("xlabel"), 28), "ylabel": _s(spec.get("ylabel"), 28)}
 
 
 def _blocks(raw: Any, where: str, warnings: List[str]) -> List[Dict[str, Any]]:
@@ -56,8 +109,11 @@ def _blocks(raw: Any, where: str, warnings: List[str]) -> List[Dict[str, Any]]:
             block["md"] = _s(item.get("md") or item.get("text") or item.get("tex"))
         if kind == "figure":
             block["caption"] = _s(item.get("caption"), 400)
-            spec = item.get("spec") if isinstance(item.get("spec"), dict) else {}
-            block["spec"] = spec
+            raw_figure = item.get("spec")
+            figure = _figure_spec(raw_figure if isinstance(raw_figure, dict) else {}, where, warnings)
+            if not figure:
+                continue          # a figure with nothing to draw is not a block
+            block["spec"] = figure
         if kind in {"definition", "analogy"}:
             block["term"] = _s(item.get("term"), 200)
         if kind == "quote":
@@ -109,7 +165,7 @@ def _exercise(raw: Any, where: str, warnings: List[str]) -> Dict[str, Any] | Non
         ex["answer"] = answer
         ex["why"] = _s(raw.get("why"), 800)
     else:
-        ex["rubric"] = [_s(k, 120) for k in (raw.get("rubric") or []) if _s(k).strip()][:8]
+        ex["rubric"] = [_s(k, 120) for k in _items(raw.get("rubric"), 8) if _s(k).strip()]
         ex["answer"] = _s(raw.get("answer"), 2000)
     anchor = raw.get("anchor")
     if isinstance(anchor, dict) and anchor.get("source"):
@@ -122,7 +178,7 @@ def _resources(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
     out: Dict[str, List[Dict[str, Any]]] = {"videos": [], "reading": []}
     if not isinstance(raw, dict):
         return out
-    for video in (raw.get("videos") or [])[:12]:
+    for video in _items(raw.get("videos"), 12):
         if not isinstance(video, dict) or not _s(video.get("id")).strip():
             continue
         out["videos"].append({
@@ -136,7 +192,7 @@ def _resources(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
             "thumb_data": _s(video.get("thumb_data"), 90000),
             "level": _s(video.get("level"), 20) if _s(video.get("level")) in LEVELS else "",
         })
-    for item in (raw.get("reading") or [])[:16]:
+    for item in _items(raw.get("reading"), 16):
         if not isinstance(item, dict) or not (_s(item.get("href")).strip() or _s(item.get("title")).strip()):
             continue
         out["reading"].append({
@@ -170,14 +226,14 @@ def validate(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
 
     provenance = raw.get("provenance") if isinstance(raw.get("provenance"), dict) else {}
     sources = []
-    for src in (provenance.get("sources") or [])[:40]:
+    for src in _items(provenance.get("sources"), 40):
         if isinstance(src, dict) and _safe_url(src.get("url")):
             sources.append({"url": _safe_url(src.get("url")), "title": _s(src.get("title"), 300),
-                            "used_in": [ _s(u, 40) for u in (src.get("used_in") or []) ][:20]})
+                            "used_in": [_s(u, 40) for u in _items(src.get("used_in"), 20)]})
 
     sections: List[Dict[str, Any]] = []
     used_ids: set = set()
-    for index, raw_section in enumerate(raw.get("sections") or []):
+    for index, raw_section in enumerate(_list(raw.get("sections"))):
         if not isinstance(raw_section, dict):
             continue
         sid = _s(raw_section.get("id"), 40).strip().lower()
@@ -223,16 +279,16 @@ def validate(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
         "title": _s(raw.get("title"), 200) or slug.replace("-", " ").title(),
         "subtitle": _s(raw.get("subtitle"), 300),
         "thesis": _s(raw.get("thesis"), 600),
-        "outcomes": [_s(o, 200) for o in (raw.get("outcomes") or [])][:6],
+        "outcomes": [_s(o, 200) for o in _items(raw.get("outcomes"), 6)],
         "default_level": default_level,
         "identity": raw.get("identity") if isinstance(raw.get("identity"), dict) else {},
         "provenance": {
             "researched": bool(provenance.get("researched")),
-            "finders": [_s(x, 80) for x in (provenance.get("finders") or [])][:6],
-            "readers": [_s(x, 80) for x in (provenance.get("readers") or [])][:6],
+            "finders": [_s(x, 80) for x in _items(provenance.get("finders"), 6)],
+            "readers": [_s(x, 80) for x in _items(provenance.get("readers"), 6)],
             "sources": sources,
-            "failures": [_s(x, 300) for x in (provenance.get("failures") or [])][:10],
-            "warnings": [_s(x, 300) for x in (provenance.get("warnings") or [])][:10],
+            "failures": [_s(x, 300) for x in _items(provenance.get("failures"), 10)],
+            "warnings": [_s(x, 300) for x in _items(provenance.get("warnings"), 10)],
             "generated": _s(provenance.get("generated"), 40),
         },
         "sections": sections,
@@ -242,10 +298,3 @@ def validate(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
         warnings.append("course has no sections")
     return spec, warnings
 
-
-def source_count(spec: Dict[str, Any]) -> int:
-    return len(spec.get("provenance", {}).get("sources") or [])
-
-
-def is_unresearched(spec: Dict[str, Any]) -> bool:
-    return not spec.get("provenance", {}).get("researched") or source_count(spec) < 3
