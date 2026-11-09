@@ -2,7 +2,7 @@
 # Shape mirrors ~/.hermes/hermes-agent/plugin-catalog/*.yaml.
 name: coursewright
 repo: https://github.com/NehuenD/hermes_coursewright
-sha: 077fd968b20e60b3d3748ed0995b94b444030e86
+sha: 340fe17f7ade007e7488477421779048ce2d1d47
 title: Coursewright
 description: >-
   Turns a topic into one self-contained HTML course at three depths, novice, intermediate
