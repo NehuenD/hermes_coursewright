@@ -17,7 +17,10 @@ Or clone it into `$HERMES_HOME/plugins/coursewright` and turn it on:
 hermes plugins enable coursewright
 ```
 
-No API keys. Research runs through the web tools the host already has configured.
+No API keys, but it does need the network: the host model writes the course and the sources
+are read from the web. Nothing else has to be configured — research uses whatever web tools
+the host has, falls back to Wikipedia, arXiv and Stack Exchange when search returns nothing,
+and reads pages with a built-in reader when the host's extractor cannot.
 
 ## Use
 
@@ -99,6 +102,27 @@ leaflet — and every level walks at least one example through its actual values
 | `enable_videos` | `true` | look for videos |
 | `max_sources` | `12` | pages read per course |
 | `max_videos` | `6` | videos collected per course |
+| `research_timeout` | `150` | seconds spent searching and reading before it writes anyway |
+| `firecrawl_url` | `""` | scraper used when the host extractor returns nothing: empty probes a local stack on `http://localhost:3002`, `off` disables it, a full URL points anywhere |
+| `firecrawl_key` | `""` | bearer token for that scraper; empty falls back to `FIRECRAWL_API_KEY` |
+
+## What it needs from the host
+
+The plugin is written to run on someone else's Hermes, so it probes instead of assuming, and
+`coursewright_status` reports what it found:
+
+| capability | used when | if it is missing |
+|---|---|---|
+| host model (`ctx.llm`) | always | the build fails with the reason rather than writing a stub |
+| `web_search` | finding pages | keyless finders: Wikipedia, arXiv, Stack Exchange |
+| `web_extract` | reading pages | the scraper below, then a built-in `urllib` reader |
+| a scraper | second reader | `urllib` still reads plain HTML |
+| `yt-dlp` | videos | the watch list is empty and the build says why |
+| desktop preview pane | showing the page | a path and an `open …` line, and `::preview` only on desktop |
+
+`search`, `readers`, `firecrawl`, `videos`, `transcripts`, `thumbnails` and `surface` are
+what `coursewright_status` reports under `environment`. Two builds of one course cannot run
+at once, across processes as well as threads.
 
 ## Reading a course
 

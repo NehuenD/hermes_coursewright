@@ -13,6 +13,7 @@ Command:
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import logging
@@ -154,14 +155,66 @@ def _read_json(path: Path) -> dict:
 
 
 def _write(path: Path, text: str) -> None:
+    """Write through a temp file: a crash mid-write must not leave a half course page."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(text, encoding="utf-8")
+    os.replace(temp, path)
 
 
 def _store() -> Path:
     from plugins.plugin_storage import plugin_data_dir  # public plugin surface
 
     return plugin_data_dir("coursewright")
+
+
+@contextlib.contextmanager
+def _build_slot(slug: str):
+    """A cross-process guard for one course directory.
+
+    `_RUNNING` only sees this process: a CLI build and a gateway build of the same topic both
+    thought they owned the directory and overwrote each other's page and spec. The lock file
+    is advisory and non-blocking — the second build is told to wait, not queued behind a
+    twenty-minute one.
+    """
+    handle = None
+    try:
+        import fcntl
+
+        lock_dir = _store() / "state"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_dir / f"{slug}.lock", "w")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+    except ImportError:                      # not POSIX: the in-process guard is all there is
+        yield True
+    finally:
+        if handle is not None:
+            handle.close()
+
+
+def _caps(ctx, *, want_research: bool = True, want_videos: bool = True) -> dict:
+    """Research settings, including which scraper to use, as research.gather expects them."""
+    def _setting(key, default):
+        try:
+            value = ctx.get_config(key, default=default)
+        except Exception:
+            return default
+        return default if value is None else value
+
+    key = str(_setting("firecrawl_key", "") or "").strip() or os.environ.get("FIRECRAWL_API_KEY", "")
+    timeout = _as_int(_setting("research_timeout", 150)) or 150
+    return {
+        "max_sources": _as_int(_setting("max_sources", 12)) if want_research else 0,
+        "max_videos": _as_int(_setting("max_videos", 6)) if want_videos else 0,
+        "timeout": max(30, min(timeout, 900)),
+        "firecrawl_url": str(_setting("firecrawl_url", "") or ""),
+        "firecrawl_key": key.strip(),
+    }
 
 
 def _guess_language(topic: str, explicit: str) -> str:
@@ -229,14 +282,20 @@ def make_plan(ctx, args: dict) -> dict:
     level = str(args.get("level") or ctx.get_config("default_level", default="intermediate"))
     language = _guess_language(topic, str(args.get("language") or ""))
 
-    plan = author.plan_course(ctx, topic=topic, level=level, language=language,
-                              # The identity is assigned here to keep the course set visually
-                              # varied; asking the model to both use it and avoid the last one
-                              # put two contradictory instructions in the same prompt.
-                              avoid_identity=None,
-                              sections=_as_int(args.get("max_sections")),
-                              forced_identity=tokenmod.assign(
-                                  [row["identity"] for row in _inventory() if row.get("identity")]))
+    try:
+        plan = author.plan_course(ctx, topic=topic, level=level, language=language,
+                                  # The identity is assigned here to keep the course set visually
+                                  # varied; asking the model to both use it and avoid the last one
+                                  # put two contradictory instructions in the same prompt.
+                                  avoid_identity=None,
+                                  sections=_as_int(args.get("max_sections")),
+                                  forced_identity=tokenmod.assign(
+                                      [row["identity"] for row in _inventory() if row.get("identity")]))
+    except author.ModelUnavailable as exc:
+        return {"ok": False,
+                "error": (f"the host would not run the model ({exc}). A course needs model access: "
+                          f"check that this plugin is trusted for ctx.llm and that a model is "
+                          f"configured.")}
     plan["default_level"] = level
     plan["requested_topic"] = topic
     plan["planned_at"] = _now()
@@ -292,8 +351,9 @@ def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "")
             message = (f"Your course is ready: \"{result['title']}\", "
                        f"{result['sections']} sections, {result['bytes'] // 1024} KB, "
                        f"opens at {result['level']}.\n"
-                       f"{result['html']}"
-                       + (f"\n\n{result['preview']}" if result.get("preview") else ""))
+                       f"{result['mirror'] or result['html']}"
+                       + (f"\n\n{result['preview']}" if result.get("preview") else "")
+                       + (f"\n\nOpen it with: {result['open']}" if result.get("open") else ""))
         except Exception as exc:  # a background failure must still reach the user
             logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
             _record_build({"ok": False, "error": f"{type(exc).__name__}: {exc}",
@@ -352,13 +412,23 @@ def build_course(ctx, args: dict) -> dict:
         _release_build(guard)
 
 
+def _surface(ctx) -> str:
+    """`cli`/`tui`/`desktop`/`acp`, a messaging platform, or "" outside a session."""
+    try:
+        return str(ctx.session_surface() or "")
+    except Exception:
+        return ""
+
+
 def _open_in_pane(ctx, path: Path, title: str) -> bool:
     """Show the finished page in the desktop's preview pane beside the chat.
 
-    Best effort by design: the tool belongs to the desktop surface, so on any other
-    surface (Telegram, plain CLI, a headless run) the dispatch answers with an error and
-    the caller falls back to the inline `::preview` directive it returns instead.
+    The pane belongs to one surface, so it is only asked for there. Dispatching it from a
+    Telegram chat or a CLI session used to fail on every build; worse, the `::preview`
+    directive that replaced it is desktop-only syntax that those surfaces print verbatim.
     """
+    if _surface(ctx) not in {"desktop", ""}:
+        return False
     try:
         raw = ctx.dispatch_tool("desktop_preview",
                                 {"action": "open", "url": str(path), "label": str(title)[:40]})
@@ -387,6 +457,7 @@ def _build_course(ctx, args: dict) -> dict:
         max_sections = _MAX_SECTIONS_BUILT
     max_sections = max(2, min(max_sections, _MAX_SECTIONS_BUILT))
     record = None
+    sections: list = []
 
     if spec_path:                                     # 1. a finished spec
         raw = _read_json(Path(spec_path).expanduser())
@@ -432,9 +503,7 @@ def _build_course(ctx, args: dict) -> dict:
                 ctx,
                 topic=topic or plan.get("title") or "course",
                 language=language,
-                caps={"max_sources": ctx.get_config("max_sources", default=12) if want_research else 0,
-                      "max_videos": ctx.get_config("max_videos", default=6) if want_videos else 0,
-                      "timeout": 150},
+                caps=_caps(ctx, want_research=want_research, want_videos=want_videos),
                 cache_dir=_store() / "cache",
                 force=bool(args.get("refresh")),
                 want_videos=want_videos,
@@ -447,6 +516,14 @@ def _build_course(ctx, args: dict) -> dict:
         raw = author.assemble(plan, sections, topic=topic or plan.get("title") or "course",
                               research=record, picks=picks)
         origin = "model"
+
+    if origin == "model" and sections and all(section.get("_thin") for section in sections):
+        # eight placeholder sections are worse than an error: nothing was learned, and the
+        # earlier code called this "ok" and wrote the page anyway
+        return {"ok": False,
+                "error": (f"the model did not answer any section"
+                          + (f" ({author.last_error()})" if author.last_error() else "")),
+                "warnings": ["no section was drafted; nothing was written"]}
 
     if args.get("level") in {"novice", "intermediate", "advanced"}:
         raw["default_level"] = args["level"]
@@ -481,10 +558,16 @@ def _build_course(ctx, args: dict) -> dict:
 
     store = _store() / "courses" / clean["slug"]
     html_path = store / "index.html"
-    _write(html_path, page)
-    _write(store / "spec.json", json.dumps(clean, indent=2, ensure_ascii=False))
-    if origin == "model" and record is not None:
-        _write(store / "research.json", json.dumps(record, indent=2, ensure_ascii=False))
+    with _build_slot(clean["slug"]) as owned:
+        if not owned:
+            return {"ok": False,
+                    "warnings": warnings,
+                    "error": (f"another process is writing \"{clean['slug']}\" right now; "
+                              f"wait for it to finish, or run /courses to see what is on disk")}
+        _write(html_path, page)
+        _write(store / "spec.json", json.dumps(clean, indent=2, ensure_ascii=False))
+        if origin == "model" and record is not None:
+            _write(store / "research.json", json.dumps(record, indent=2, ensure_ascii=False))
 
     mirror = ""
     mirror_root = str(ctx.get_config("courses_dir", default="~/Courses") or "").strip()
@@ -506,6 +589,7 @@ def _build_course(ctx, args: dict) -> dict:
     # and let the caller skip the inline directive. Falls back to the directive when the
     # surface has no pane. The visible mirror is the friendlier path for the tab (a stable
     # location outside plugin-data) and re-opening the same URL reuses the tab.
+    surface = _surface(ctx)
     pane_open = _open_in_pane(ctx, Path(mirror) if mirror else html_path, clean["title"])
 
     # how much explanation each depth actually carries: a thin build should be visible
@@ -528,8 +612,16 @@ def _build_course(ctx, args: dict) -> dict:
         "researched": clean["provenance"]["researched"],
         "bytes": len(page.encode("utf-8")),
         "warnings": warnings,
-        "preview": "" if pane_open else f'::preview{{file="{html_path}"}}',
+        # `::preview{...}` is desktop-only syntax: anywhere else it is a line of text the user
+        # has to delete, so those surfaces get the path and a command instead
+        "preview": (f'::preview{{file="{html_path}"}}'
+                    if (not pane_open and surface in {"desktop", ""}) else ""),
         "pane": pane_open,
+        "surface": surface,
+        "open": (f"open \"{mirror or html_path}\"" if surface not in {"desktop", ""} else ""),
+        "readers": (record or {}).get("readers", []),
+        "sources": len((record or {}).get("sources") or []),
+        "videos": len((record or {}).get("videos") or []),
     }
     _record_build({k: result[k] for k in ("ok", "slug", "title", "sections", "source",
                                           "researched", "bytes", "words")})
@@ -547,9 +639,13 @@ LIST_SCHEMA = {
 
 STATUS_SCHEMA = {
     "name": "coursewright_status",
-    "description": ("Report the last coursewright build (ok or error, counts, timing) and what is on "
-                    "disk: courses, research cache entries, saved plans."),
-    "parameters": {"type": "object", "properties": {}},
+    "description": ("Report the last coursewright build (ok or error, counts, timing), what this "
+                    "host can actually do (search, readers, scraper, videos, preview surface) and "
+                    "what is on disk: courses, research cache entries, saved plans. Pass "
+                    "probe=true to also test the model with a tiny call."),
+    "parameters": {"type": "object", "properties": {
+        "probe": {"type": "boolean",
+                  "description": "Also make one tiny model call to prove inference works."}}},
 }
 
 
@@ -611,8 +707,25 @@ def course_status(ctx, args: dict) -> dict:
     with _BUILD_LOCK:
         running = sorted(name for name, thread in _ACTIVE.items() if thread.is_alive())
         claimed = sorted(key for key in _RUNNING if key not in _ACTIVE)
+    environment = {}
+    try:
+        environment = research_mod.describe(ctx, _caps(ctx))
+    except Exception as exc:                      # a probe must never break the report
+        environment = {"error": f"{type(exc).__name__}: {exc}"}
+    environment["surface"] = _surface(ctx) or "none"
+    environment["store"] = str(_store())
+    if args.get("probe"):
+        try:
+            ctx.llm.complete(messages=[{"role": "user", "content": "ping"}], max_tokens=4,
+                             timeout=30, purpose="coursewright.probe")
+            environment["model"] = {"ok": True, "detail": "answered"}
+        except Exception as exc:
+            environment["model"] = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    else:
+        environment["model"] = {"ok": None, "detail": "not probed; pass probe=true to test it"}
     payload = {
         "ok": True,
+        "environment": environment,
         "last_build": last,
         "running": running,
         "claimed": claimed,

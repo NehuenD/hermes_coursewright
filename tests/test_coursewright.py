@@ -33,6 +33,9 @@ class FakeLlm:
         self.sections = sections
         self.figure = figure or {"type": "flow", "steps": ["a", "b", "c"]}
 
+    def complete(self, **kw):
+        return type("R", (), {"text": "pong"})()
+
     def complete_structured(self, **kw):
         purpose = kw.get("purpose") or ""
         text = kw["input"][0]["text"] if kw.get("input") else ""
@@ -72,8 +75,9 @@ class FakeState:
 
 
 class FakeCtx:
-    def __init__(self, config=None, llm=None, search=None, extract=None):
+    def __init__(self, config=None, llm=None, search=None, extract=None, surface="desktop"):
         self.llm = llm or FakeLlm()
+        self.surface = surface
         self.state = FakeState()
         self.config = config or {}
         self.search = search
@@ -93,6 +97,9 @@ class FakeCtx:
         if name == "web_extract":
             return json.dumps({"content": self.extract(args["urls"][0]) if self.extract else ""})
         return json.dumps({"error": "no pane in this test"})
+
+    def session_surface(self):
+        return self.surface
 
     def inject_message(self, content, role="user", session_key=None, origin=None):
         self.injected.append((content, role, session_key))
@@ -753,3 +760,166 @@ class TestDevImportPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --------------------------------------------------------------------------
+# portability: the plugin must not assume this machine
+# --------------------------------------------------------------------------
+class TestReaderLadder(unittest.TestCase):
+    def test_html_to_text_drops_chrome_and_keeps_prose(self):
+        page = ("<html><head><style>body{color:red}</style></head><body>"
+                "<nav><a href='/'>Home</a></nav><article><h1>Heads</h1>"
+                "<p>A head projects into a query, a key and a value.</p></article>"
+                "<script>var x = '<p>not text</p>';</script><footer>legal</footer></body></html>")
+        text = research.html_to_text(page)
+        self.assertIn("A head projects into a query", text)
+        self.assertNotIn("Home", text)
+        self.assertNotIn("not text", text)
+        self.assertNotIn("color:red", text)
+        self.assertNotIn("legal", text)
+
+    def test_stdlib_read_is_in_the_ladder_after_the_other_two(self):
+        ctx = FakeCtx(search=lambda q: [{"url": "https://example.com/a", "title": "A"}],
+                      extract=lambda url: "")          # the host extractor returns nothing
+        body = ("A head projects each token into a query, a key and a value. "
+                "Scores are scaled before the softmax so the distribution stays sharp. " * 4)
+        real_stdlib, real_keyless = research.stdlib_read, research._keyless_find
+        research.stdlib_read = lambda url, timeout=12.0: body          # the last rung answers
+        research._keyless_find = lambda topic, language: []            # no network in tests
+        try:
+            found = research.gather(ctx, topic="t", caps={"max_sources": 3, "max_videos": 0,
+                                                          "firecrawl_url": "off"},
+                                    want_videos=False)
+        finally:
+            research.stdlib_read, research._keyless_find = real_stdlib, real_keyless
+        self.assertEqual(found["sources"][0]["url"], "https://example.com/a")
+        self.assertIn("urllib", found["readers"])
+
+
+class TestFirecrawlConfig(unittest.TestCase):
+    def test_empty_keeps_the_local_default(self):
+        self.assertEqual(research.firecrawl_target({}), ("http://localhost:3002", ""))
+
+    def test_off_disables_it(self):
+        for value in ("off", "OFF", "none", "false", "-"):
+            self.assertEqual(research.firecrawl_target({"firecrawl_url": value}), ("", ""))
+
+    def test_a_full_url_and_key_are_used(self):
+        self.assertEqual(
+            research.firecrawl_target({"firecrawl_url": "https://api.firecrawl.dev/",
+                                       "firecrawl_key": "k"}),
+            ("https://api.firecrawl.dev", "k"))
+
+    def test_a_bare_word_is_not_a_url(self):
+        self.assertEqual(research.firecrawl_target({"firecrawl_url": "localhost:3002"}), ("", ""))
+
+    def test_the_key_can_come_from_the_environment(self):
+        os.environ["FIRECRAWL_API_KEY"] = "from-env"
+        try:
+            caps = cw._caps(FakeCtx(config={"firecrawl_url": "https://api.firecrawl.dev"}))
+        finally:
+            del os.environ["FIRECRAWL_API_KEY"]
+        self.assertEqual(caps["firecrawl_key"], "from-env")
+
+    def test_caps_default_to_this_machines_local_stack(self):
+        caps = cw._caps(FakeCtx(config={}))
+        self.assertEqual(caps["firecrawl_url"], "")
+        self.assertEqual(research.firecrawl_target(caps)[0], "http://localhost:3002")
+
+
+class TestEnvironmentReport(unittest.TestCase):
+    def test_describe_reports_readers_and_gaps(self):
+        report = research.describe(None, {"firecrawl_url": "off"}, probe_search=False)
+        self.assertIn("urllib", report["readers"])
+        self.assertFalse(report["firecrawl"]["configured"])
+        self.assertIn("yt-dlp", report["videos"]["detail"])
+        self.assertIsNone(report["search"]["ok"])
+
+    def test_status_carries_the_report_and_the_surface(self):
+        ctx = FakeCtx(config={"firecrawl_url": "off"}, surface="telegram")
+        payload = cw.course_status(ctx, {})
+        self.assertEqual(payload["environment"]["surface"], "telegram")
+        self.assertIn("videos", payload["environment"])
+        self.assertIsNone(payload["environment"]["model"]["ok"])   # not probed by default
+
+    def test_probe_asks_the_model_once(self):
+        ctx = FakeCtx(config={"firecrawl_url": "off"})
+        payload = cw.course_status(ctx, {"probe": True})
+        self.assertTrue(payload["environment"]["model"]["ok"])
+
+    def test_probe_reports_a_refused_model(self):
+        class Denied(FakeLlm):
+            def complete(self, **kw):
+                raise PermissionError("not trusted")
+
+        payload = cw.course_status(FakeCtx(config={"firecrawl_url": "off"}, llm=Denied()),
+                                   {"probe": True})
+        self.assertFalse(payload["environment"]["model"]["ok"])
+        self.assertIn("PermissionError", payload["environment"]["model"]["detail"])
+
+
+class TestSurface(unittest.TestCase):
+    def test_a_chat_surface_never_gets_desktop_syntax(self):
+        page = pathlib.Path(tempfile.mkdtemp()) / "index.html"
+        page.write_text("<html></html>", encoding="utf-8")
+        ctx = FakeCtx(surface="telegram")
+        self.assertFalse(cw._open_in_pane(ctx, page, "T"))
+        self.assertEqual([n for n, _ in ctx.dispatched if n == "desktop_preview"], [])
+
+    def test_desktop_still_asks_for_the_pane(self):
+        page = pathlib.Path(tempfile.mkdtemp()) / "index.html"
+        page.write_text("<html></html>", encoding="utf-8")
+        ctx = FakeCtx(surface="desktop")
+        self.assertFalse(cw._open_in_pane(ctx, page, "T"))   # the fake refuses it
+        self.assertEqual([n for n, _ in ctx.dispatched if n == "desktop_preview"],
+                         ["desktop_preview"])
+
+
+class TestStoreSafety(unittest.TestCase):
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self._old_store = cw._store
+        cw._store = lambda: self.dir
+
+    def tearDown(self):
+        cw._store = self._old_store
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_write_is_atomic(self):
+        target = self.dir / "courses" / "x" / "index.html"
+        cw._write(target, "page")
+        self.assertEqual(target.read_text(encoding="utf-8"), "page")
+        self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def test_a_second_process_cannot_write_the_same_slug(self):
+        with cw._build_slot("slug") as first:
+            self.assertTrue(first)
+            with cw._build_slot("slug") as second:
+                self.assertFalse(second)
+        with cw._build_slot("slug") as again:
+            self.assertTrue(again)
+
+
+class TestModelRefusal(unittest.TestCase):
+    def test_a_trust_denial_fails_the_build_instead_of_drafting_a_stub(self):
+        class Denied(FakeLlm):
+            def complete_structured(self, **kw):
+                raise PermissionError("plugin not trusted for llm")
+
+        ctx = FakeCtx(llm=Denied())
+        result = cw.make_plan(ctx, {"topic": "t"})
+        self.assertFalse(result["ok"])
+        self.assertIn("model", result["error"].lower())
+
+    def test_every_section_thin_is_not_a_course(self):
+        class Silent(FakeLlm):
+            def complete_structured(self, **kw):
+                if kw.get("purpose") == "coursewright.plan":
+                    return super().complete_structured(**kw)
+                return type("R", (), {"parsed": None, "text": ""})()
+
+        ctx = FakeCtx(llm=Silent(), config={"enable_research": False, "enable_videos": False,
+                                            "courses_dir": ""})
+        result = cw.build_course(ctx, {"topic": "t", "max_sections": 2})
+        self.assertFalse(result["ok"])
+        self.assertIn("did not answer", result["error"])

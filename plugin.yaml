@@ -1,12 +1,14 @@
 name: coursewright
-version: 0.2.2
+version: 0.3.0
 manifest_version: 2
 license: MIT
 description: >-
   Generates a self-contained, interactive HTML course on any subject at three
   levels of depth (novice, intermediate, advanced) with an in-place level
   toggle, worked visuals, exercises, curated videos and reading, and a
-  provenance footer that says what was actually researched.
+  provenance footer that says what was actually researched. Needs network
+  access: the course is written by the host model, and sources are read from
+  the web.
 author: Nehuen
 tags: [learning, study, courses, html, education]
 provides_tools:
@@ -16,6 +18,14 @@ provides_tools:
   - coursewright_status
 provides_hooks: []
 requires_env: []
+# Optional at runtime, installed when the plugin is: the scraper client, video
+# search, transcript badges and thumbnails. Every one of them degrades to
+# "feature off, and the course says so" rather than a crash.
+python_dependencies:
+  - httpx
+  - Pillow
+  - yt-dlp
+  - youtube-transcript-api
 config_schema:
   default_level:
     type: str
@@ -45,3 +55,21 @@ config_schema:
     type: int
     default: 12
     label: Maximum sources read per course
+  firecrawl_url:
+    type: str
+    default: ""
+    label: Scraper URL (Firecrawl)
+    description: >-
+      A Firecrawl instance used as a second reader when the host's own extractor returns
+      nothing. Empty probes a local stack on http://localhost:3002; "off" disables it; a full
+      URL points at a self-hosted instance or at https://api.firecrawl.dev with the key below.
+  firecrawl_key:
+    type: secret
+    default: ""
+    label: Scraper API key
+    description: Sent as a Bearer token to the scraper above. Empty falls back to FIRECRAWL_API_KEY.
+  research_timeout:
+    type: int
+    default: 150
+    label: Research seconds
+    description: Time budget for searching and reading before the course is written anyway.

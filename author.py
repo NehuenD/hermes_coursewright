@@ -187,9 +187,25 @@ def _extract_json(text: str) -> Optional[Any]:
     return None
 
 
+class ModelUnavailable(RuntimeError):
+    """The host refused to run the model at all: a trust gate or no provider configured.
+
+    That is not a generation that came back thin — there is nothing to retry, and pretending
+    otherwise produced a one-section course reported as success.
+    """
+
+
+_LAST_ERROR: List[str] = [""]
+
+
+def last_error() -> str:
+    """The most recent model failure, for a build that has to explain itself."""
+    return _LAST_ERROR[0]
+
+
 def _ask(ctx, *, instructions: str, payload: str, purpose: str, max_tokens: int,
          json_mode: bool = True) -> Optional[Any]:
-    """One structured call through the host model; None on any failure (never raises)."""
+    """One structured call through the host model; None on a failed response."""
     try:
         result = ctx.llm.complete_structured(
             instructions=instructions,
@@ -201,6 +217,12 @@ def _ask(ctx, *, instructions: str, payload: str, purpose: str, max_tokens: int,
             timeout=300,
         )
     except Exception as exc:  # trust gate, provider error, timeout
+        _LAST_ERROR[0] = f"{type(exc).__name__}: {exc}"
+        # A denied trust gate is terminal: every later call fails the same way, so the build
+        # should stop and say so rather than draft eight placeholder sections.
+        if isinstance(exc, PermissionError) or type(exc).__name__ == "PluginLlmTrustError":
+            logger.error("coursewright: the host refused model access: %s", exc)
+            raise ModelUnavailable(str(exc)) from exc
         logger.warning("coursewright: %s call failed: %s", purpose, exc)
         return None
     parsed = getattr(result, "parsed", None)
@@ -512,6 +534,7 @@ def _thin_section(brief: Dict[str, Any], index: int, why: str) -> Dict[str, Any]
         "eyebrow": brief.get("eyebrow", ""),
         "hook": brief.get("hook", ""),
         "levels": {"novice": dict(body), "intermediate": dict(body), "advanced": dict(body)},
+        "_thin": True,
         "_warnings": [f"section {index + 1} was rebuilt thin: {why}"],
     }
 

@@ -30,7 +30,10 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 7 * 24 * 3600
-_FIRECRAWL_LOCAL = "http://localhost:3002"
+# A local `firecrawl` compose stack is the friendliest default, but it is a default: the setting
+# `firecrawl_url` replaces it, and an empty value or "off" means never probe it at all.
+_FIRECRAWL_DEFAULT = "http://localhost:3002"
+_READ_MAX_BYTES = 400_000
 _THUMB_MAX_BYTES = 60_000
 _THUMB_TOTAL_BYTES = 2_000_000
 _MIN_VIDEO_SECONDS = 120
@@ -326,22 +329,46 @@ def probe_web(ctx) -> bool:
     return bool(_search(ctx, "wikipedia", 1))
 
 
-def probe_firecrawl(timeout: float = 2.5) -> bool:
+def firecrawl_target(caps: Optional[Dict[str, Any]]) -> tuple:
+    """``(base_url, api_key)`` from settings; ``("", "")`` means "do not use a scraper".
+
+    Empty setting keeps the local-stack default so an install that already runs firecrawl on
+    this machine needs no configuration; ``off``/``none``/``no``/``false`` turns it off, and a
+    full URL points at a self-hosted stack somewhere else or at the cloud API.
+    """
+    caps = caps or {}
+    raw = str(caps.get("firecrawl_url") or "").strip()
+    if raw.lower() in {"off", "none", "no", "false", "disabled", "-"}:
+        return "", ""
+    base = raw or _FIRECRAWL_DEFAULT
+    if not base.startswith(("http://", "https://")):
+        return "", ""
+    return base.rstrip("/"), str(caps.get("firecrawl_key") or "").strip()
+
+
+def probe_firecrawl(base: str = "", key: str = "", timeout: float = 2.5) -> bool:
+    """Does that scraper actually answer? A configured URL is not evidence."""
+    if not base:
+        return False
     try:
         import httpx
 
-        with httpx.Client(timeout=timeout) as client:
-            return client.get(_FIRECRAWL_LOCAL + "/").status_code < 500
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        with httpx.Client(timeout=timeout, headers=headers) as client:
+            return client.get(base + "/").status_code < 500
     except Exception:
         return False
 
 
-def _firecrawl_scrape(url: str, timeout: float = 25.0) -> str:
+def _firecrawl_scrape(url: str, base: str = "", key: str = "", timeout: float = 25.0) -> str:
+    if not base:
+        return ""
     try:
         import httpx
 
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(_FIRECRAWL_LOCAL + "/v1/scrape",
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        with httpx.Client(timeout=timeout, headers=headers) as client:
+            resp = client.post(base + "/v1/scrape",
                                json={"url": url, "formats": ["markdown"], "onlyMainContent": True})
             if resp.status_code != 200:
                 return ""
@@ -349,6 +376,52 @@ def _firecrawl_scrape(url: str, timeout: float = 25.0) -> str:
             return str(((payload.get("data") or {}).get("markdown")) or "")
     except Exception:
         return ""
+
+
+_BLOCK_TAG = re.compile(r"(?i)<(?:br|/p|/div|/li|/tr|/h[1-6]|/section|/article)\s*/?>")
+_DROP_TAG = re.compile(
+    r"(?is)<(script|style|noscript|svg|nav|header|footer|aside|form|button|iframe)[^>]*>.*?</\1>")
+
+
+def stdlib_read(url: str, timeout: float = 12.0) -> str:
+    """Last rung of the reader ladder: urllib, no dependency, no key.
+
+    It exists for the hosts the other two rungs miss — a proxy that passes HTML but blocks a
+    scraping API, a cloud scraper with no key configured, a network where the plugin's own
+    HTTP client cannot be installed. Rougher text than a real extractor, but a course with a
+    rough excerpt beats a course with no source at all.
+    """
+    try:
+        import urllib.request
+
+        request = urllib.request.Request(
+            url, headers={"User-Agent": _UA,
+                          "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status >= 400:
+                return ""
+            kind = str(response.headers.get_content_type() or "")
+            if kind and not (kind.startswith("text/") or "xhtml" in kind or "xml" in kind):
+                return ""                      # a PDF or an image is not an excerpt
+            charset = response.headers.get_content_charset() or "utf-8"
+            raw = response.read(_READ_MAX_BYTES)
+    except Exception:
+        return ""
+    try:
+        page = raw.decode(charset, "replace")
+    except LookupError:
+        page = raw.decode("utf-8", "replace")
+    return html_to_text(page)
+
+
+def html_to_text(page: str) -> str:
+    """HTML to readable text: drop the chrome, keep the paragraphs."""
+    page = _DROP_TAG.sub(" ", page or "")
+    page = _BLOCK_TAG.sub("\n", page)
+    text = html.unescape(re.sub(r"(?s)<[^>]+>", " ", page))
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    return text.strip()
 
 
 # --------------------------------------------------------------------------
@@ -527,16 +600,23 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
     # read
     read_count = 0
     seen_keys: set = set()
+    fc_base, fc_key = firecrawl_target(caps)
+    fc_ok = probe_firecrawl(fc_base, fc_key) if fc_base else False
+    if fc_base:
+        record["readers"].append("firecrawl" if fc_ok else "firecrawl (unreachable)")
     for index, candidate in enumerate(candidates if want_sources else []):
         if read_count >= max_sources or time.monotonic() > deadline:
             break
         text = _extract(ctx, [candidate["url"]])
         reader = "web_extract"
+        if len(text.strip()) < 200 and fc_ok and index < 8:
+            # rescue 1: the configured scraper, only when it answers a live probe
+            text = _firecrawl_scrape(candidate["url"], fc_base, fc_key)
+            reader = "firecrawl"
         if len(text.strip()) < 200:
-            # rescue: Firecrawl's own scraper, only when it answers a live probe
-            if probe_firecrawl() and index < 6:
-                text = _firecrawl_scrape(candidate["url"])
-                reader = "firecrawl"
+            # rescue 2: urllib, which needs nothing installed and nothing configured
+            text = stdlib_read(candidate["url"])
+            reader = "urllib"
         excerpt = _digest(text, 800)
         if len(excerpt) < 160:
             record["failures"].append(f"could not read {_domain(candidate['url']) or candidate['url']}")
@@ -598,6 +678,52 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
     logger.info("coursewright research: %d sources, %d videos, %d failures",
                 len(record["sources"]), len(record["videos"]), len(record["failures"]))
     return record
+
+
+def describe(ctx=None, caps: Optional[Dict[str, Any]] = None, *, probe_search: bool = True) -> Dict[str, Any]:
+    """What this host can actually do, probed rather than assumed.
+
+    Every entry says what the plugin will *use*, not what is configured: a key in a config
+    file is not a working backend, and a course built on that assumption is a course with no
+    sources. Cheap by default; the one network call is a single search when a ctx is given.
+    """
+    caps = caps or {}
+    fc_base, fc_key = firecrawl_target(caps)
+    search_ok = probe_web(ctx) if (ctx is not None and probe_search) else None
+
+    readers = ["urllib"]                       # always available: stdlib, no dependency
+    if search_ok is not False:
+        readers.insert(0, "web_extract")
+    if fc_base and probe_firecrawl(fc_base, fc_key):
+        readers.insert(0, "firecrawl")
+
+    video_ok = probe_videos()
+    transcript_ok = False
+    try:
+        import youtube_transcript_api  # noqa: F401
+        transcript_ok = True
+    except Exception:
+        pass
+    try:
+        import PIL  # noqa: F401
+        thumb_ok = True
+    except Exception:
+        thumb_ok = False
+
+    return {
+        "search": {
+            "ok": search_ok,
+            "detail": ("web_search answered" if search_ok else
+                       "no web backend: keyless rungs only (wikipedia, arxiv, stackexchange)"
+                       if search_ok is False else "not probed"),
+        },
+        "readers": readers,
+        "firecrawl": {"configured": bool(fc_base), "url": fc_base, "key": bool(fc_key)},
+        "videos": {"ok": video_ok,
+                   "detail": "yt-dlp present" if video_ok else "yt-dlp not installed: no videos"},
+        "transcripts": {"ok": transcript_ok},
+        "thumbnails": {"ok": thumb_ok},
+    }
 
 
 def source_block(record: Optional[Dict[str, Any]], limit: int = 8) -> str:
