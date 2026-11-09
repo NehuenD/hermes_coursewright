@@ -39,7 +39,7 @@ BLOCK_MENU = """Available block kinds (use several different ones; never invent 
 - {"kind":"steps","items":["first","second","third"]}
 - {"kind":"comparison","left":"A","right":"B","items":["a1","b1","a2","b2"]}  (items alternate left,right)
 - {"kind":"timeline","items":["1937 — something happened","1993 — something else"]}
-- {"kind":"math","md":"plain text math: _x or _{...} for a subscript, ^x or ^{...} for a superscript. No LaTeX, no dollar signs, no HTML"}
+- {"kind":"math","md":"formulas only, one step per line — `a = b` on its own line, `= c` on the next. Subscript `_x` or `_{...}`, superscript `^x` or `^{...}`. No LaTeX, no dollar signs, no HTML, and no sentences: commentary belongs in a prose block"}
 - {"kind":"code","lang":"python","code":"short, runnable, commented"}
 - {"kind":"aside","md":"one sentence of nuance"}
 - {"kind":"checkpoint","md":"one sentence: what the reader should now be able to do"}
@@ -105,6 +105,9 @@ HARD_RULES = """HARD RULES:
   reads it through. An analogy may support it; an analogy may not replace it.
 - No filler. A checkpoint, aside or callout never stands in for the mechanism; at most one
   checkpoint, at the end of a level.
+- A math block is formulas, not prose: one relation per line, `=` aligned by the renderer, a
+  chain split across lines (`a = b` then `= c`). Any sentence that explains a formula goes in
+  the prose around it.
 - Delete any sentence that would still be true of a different subject ("this matters because
   it affects quality"). Prefer the number, the mechanism, or the failure.
 - Write in {language}.

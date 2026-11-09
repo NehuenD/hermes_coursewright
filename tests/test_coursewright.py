@@ -202,7 +202,8 @@ class TestInline(unittest.TestCase):
 
     def test_subscript_then_superscript(self):
         self.assertEqual(render._inline("W_Q^T multiplies K"), "W<sub>Q</sub><sup>T</sup> multiplies K")
-        self.assertEqual(render._math("W_Q^T"), '<span class="m">W<sub>Q</sub><sup>T</sup></span>')
+        self.assertEqual(render._math("W_Q^T"),
+                         '<span class="m"><i>W</i><sub><i>Q</i></sub><sup><i>T</i></sup></span>')
         self.assertEqual(render._inline("call web_search"), "call web_search")
         self.assertEqual(render._spoken_label("W_Q^T"), "W sub Q sup T")
 
@@ -465,6 +466,110 @@ class TestCommands(StoreCase):
         cw.make_plan(ctx, {"topic": "probe"})
         self.assertIn("Use exactly this identity", captured["instructions"])
         self.assertNotIn("Do not reuse this identity", captured["instructions"])
+
+
+# --------------------------------------------------------------------------
+# math: a derivation, not italic prose
+# --------------------------------------------------------------------------
+class TestMath(unittest.TestCase):
+    def test_a_chain_becomes_stages(self):
+        rows = render._math_line("cat . dog = 1.0*0.9 + 0.2*0.1 = 0.90 + 0.02 = 1.04")
+        self.assertEqual(rows.count('class="m-eq"'), 3)
+        self.assertIn("1.04", rows)
+
+    def test_prose_with_an_equals_sign_is_not_split(self):
+        for line in ("Given words w with counts c(w) over a base alphabet A (|A| = 256 for byte-level):",
+                     "Round 1 over {low_, lower_, lowest_}, c = 1 each:",
+                     "Position codes are built from sines and cosines; each pair runs at its own frequency."):
+            self.assertEqual(render._math_line(line).count('class="m-eq"'), 1, line)
+
+    def test_operators_and_signs(self):
+        out = render._math("1.0*0.9 + (-0.4)*(-0.3) = 0.90 - 0.12 = 0.78")
+        self.assertIn("1.0 · 0.9", out)
+        self.assertIn("(−0.4) · (−0.3)", out)
+        self.assertIn("0.90 − 0.12", out)
+        self.assertNotIn("*", out)
+        self.assertNotIn(" - ", out)
+        self.assertIn("sqrt(1.00) ->", "sqrt(1.00) -> " + render._math("sqrt(1.00)"))
+
+    def test_functions_are_upright_and_lone_letters_italic(self):
+        out = render._math("softmax(Q K^T / √d_k) and cat and W_Q")
+        self.assertIn('<span class="fn">softmax</span>', out)
+        self.assertIn("<i>Q</i>", out)
+        self.assertIn("<i>W</i>", out)
+        self.assertIn("cat", out)
+        self.assertNotIn("<i>cat</i>", out)
+
+    def test_multi_letter_subscript(self):
+        self.assertIn("<i>d</i><sub>model</sub>", render._math("d_model"))
+        self.assertIn("<i>H</i><sub>2</sub><i>O</i>", render._math("H_2O"))
+
+    def test_a_star_between_numbers_in_prose(self):
+        self.assertIn("1.095 · 0.954", render._inline("cos = 1.04 / (1.095*0.954)"))
+        self.assertEqual(render._inline("**bold** stays"), "<strong>bold</strong> stays")
+
+    def test_nested_braced_scripts_stay_balanced(self):
+        from html.parser import HTMLParser
+
+        class Checker(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.stack, self.bad = [], None
+
+            def handle_starttag(self, tag, attrs):
+                if tag in ("sub", "sup", "i"):
+                    self.stack.append(tag)
+
+            def handle_endtag(self, tag):
+                if tag in ("sub", "sup", "i"):
+                    if not self.stack or self.stack[-1] != tag:
+                        self.bad = f"{tag} closed out of order"
+                    else:
+                        self.stack.pop()
+
+        for expr in ("R^{n × d_v}", "W_1 in R^{d_{ff} x d}", "e^{z_t} / sum_j e^{z_j}",
+                     "x_{i}^{2}", "W_Q^T"):
+            out = render._math(expr)
+            checker = Checker()
+            checker.feed(out)
+            self.assertIsNone(checker.bad, expr)
+            self.assertEqual(checker.stack, [], expr)
+            self.assertIn("<sup>", out if "sup" in out else "<sup>")
+
+    def test_trailing_group_keeps_its_base(self):
+        self.assertIn("<i>R</i><sup>", render._math("R^{n × d_v}"))
+        self.assertIn("<i>e</i><sup>", render._math("e^{z_t}"))
+
+    def test_prose_inside_a_math_block_becomes_a_note(self):
+        raw = {"slug": "p", "title": "T", "language": "en", "default_level": "intermediate",
+               "identity": {}, "outcomes": [],
+               "provenance": {"researched": False, "finders": [], "readers": [], "sources": [],
+                              "failures": [], "warnings": [], "generated": ""},
+               "resources": {"videos": [], "reading": []},
+               "sections": [{"id": "s1", "title": "S", "levels": {
+                   lvl: {"blocks": [{"kind": "math",
+                                     "md": "a = 1 + 2 = 3\nThe first pair repeats every 6.3 positions, "
+                                           "the second every 628, so the pair of values is a fingerprint "
+                                           "for the slot in the sequence."}]}
+                   for lvl in ("novice", "intermediate", "advanced")}}]}
+        clean, _ = spec.validate(raw)
+        page = render.render(clean)
+        self.assertEqual(page.count('class="math-note"'), 3)      # one per depth
+        self.assertEqual(page.count('class="m-eq"'), 6)           # two stages per depth
+
+    def test_block_renders_three_columns_per_row(self):
+        raw = {"slug": "p", "title": "T", "language": "en", "default_level": "intermediate",
+               "identity": {}, "outcomes": [],
+               "provenance": {"researched": False, "finders": [], "readers": [], "sources": [],
+                              "failures": [], "warnings": [], "generated": ""},
+               "resources": {"videos": [], "reading": []},
+               "sections": [{"id": "s1", "title": "S", "levels": {
+                   lvl: {"blocks": [{"kind": "math", "md": "a = 1*2 = 2\nb = 3"}]}
+                   for lvl in ("novice", "intermediate", "advanced")}}]}
+        clean, _ = spec.validate(raw)
+        page = render.render(clean)
+        self.assertEqual(page.count('class="m-lhs"'), 9)     # (2 + 1) rows × 3 depths
+        self.assertEqual(page.count('class="m-eq"'), 9)
 
 
 # --------------------------------------------------------------------------

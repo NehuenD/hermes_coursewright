@@ -43,7 +43,7 @@ _CITE_RE = re.compile(r"\[(\d{1,2})\](?!\()")
 # underscore in it. These run in prose, steps, comparison cells and flow labels, where
 # `_scripts(aggressive=True)` would mangle identifiers.
 _BARE_SCRIPT_RE = re.compile(
-    r"(?<![\w])([A-Za-z])_(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3})"
+    r"(?<![\w])([A-Za-z])_(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3}|[a-z]{4,12})"
     r"(?:\^(\{[^}\n]{1,12}\}|[A-Za-z0-9]{1,3}))?(?![\w])")
 _BARE_FORMULA_RE = re.compile(r"([A-Z])_([0-9]{1,2})(?![a-z])")   # H_2O, C_6H_12, H_12
 _BARE_CARET_RE = re.compile(
@@ -56,6 +56,19 @@ _PLAIN_SQRT_RE = re.compile(r"(?<![\w])sqrt\s*\(([^()\n]{1,40})\)")
 def _wrap_script(tag: str, match: re.Match) -> str:
     """The base stays outside the tag: `W_Q` is W with a small Q, not a small WQ."""
     return f"{match.group(1)}<{tag}>{match.group(2).strip('{}')}</{tag}>"
+
+
+def _script_inner(text: str) -> str:
+    """Render the inside of a {...} group before it is wrapped (no straddling tags)."""
+    text = _BARE_CARET_RE.sub(_wrap_caret, text)
+    return _BARE_SCRIPT_RE.sub(_wrap_sub_sup, text)
+
+
+def _wrap_caret(match: re.Match) -> str:
+    raw = match.group(2)
+    if raw.startswith("{"):                      # `R^{n × d_v}`: nest the inner scripts first
+        return f"{match.group(1)}<sup>{_script_inner(raw.strip('{}'))}</sup>"
+    return f"{match.group(1)}<sup>{raw}</sup>"
 
 
 def _wrap_sub_sup(match: re.Match) -> str:
@@ -75,8 +88,24 @@ def _bare_scripts(text: str) -> str:
     text = _PAREN_SUPER_RE.sub(lambda m: f"{m.group(1)}<sup>{m.group(2)}</sup>", text)
     text = _PLAIN_SQRT_RE.sub(lambda m: f"√({m.group(1)})", text)
     text = _BARE_FORMULA_RE.sub(lambda m: _wrap_script("sub", m), text)
-    text = _BARE_SCRIPT_RE.sub(_wrap_sub_sup, text)
-    return _BARE_CARET_RE.sub(lambda m: _wrap_script("sup", m), text)
+    # braced sub/sup first and with balanced braces, so nesting works; what is left is the
+    # bare `W_Q` / `K^T` / `d_model` shapes the rules below understand
+    text = _scripts(text)
+    text = _BARE_CARET_RE.sub(_wrap_caret, text)
+    return _BARE_SCRIPT_RE.sub(_wrap_sub_sup, text)
+
+
+def _brace_end(text: str, start: int) -> int:
+    """Index of the `}` that closes the `{` at *start*, counting nesting; -1 if unbalanced."""
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
 
 
 def _scripts(text: str, *, aggressive: bool = False) -> str:
@@ -94,15 +123,25 @@ def _scripts(text: str, *, aggressive: bool = False) -> str:
         if char in "_^" and index + 1 < length:
             tag = "sub" if char == "_" else "sup"
             if text[index + 1] == "{":
-                close = text.find("}", index + 2)
+                # balanced braces: `R^{d_{ff} x d}` ends at its own closing brace, not at the
+                # one belonging to the inner subscript
+                close = _brace_end(text, index + 1)
                 inner = text[index + 2:close] if close != -1 else ""
-                if close != -1 and 0 < len(inner) <= 12:
-                    out.append(f"<{tag}>{inner}</{tag}>")
+                if close != -1 and 0 < len(inner) <= 40:
+                    out.append(f"<{tag}>{_scripts(inner, aggressive=aggressive)}</{tag}>")
                     index = close + 1
                     continue
             elif aggressive and text[index + 1].isalnum():
-                out.append(f"<{tag}>{text[index + 1]}</{tag}>")
-                index += 2
+                # `d_model` is d with a subscript "model", not d_m + "odel": take the whole
+                # letter run, but a digit run stays one digit so H_2O keeps its O
+                j = index + 1
+                if text[j].isalpha():
+                    while j < length and text[j].isalpha():
+                        j += 1
+                else:
+                    j = index + 2
+                out.append(f"<{tag}>{text[index + 1:j]}</{tag}>")
+                index = j
                 continue
         out.append(char)
         index += 1
@@ -118,6 +157,9 @@ def _inline(text: str) -> str:
         return "\x00hold{}\x00".format(len(staging) - 1)
 
     raw = html.escape(_TAG_RE.sub("", text or ""), quote=False)
+    # a star between digits is multiplication in a sentence ("1.095*0.954"); bold and italic
+    # only ever pair stars around words, so this cannot eat markup
+    raw = re.sub(r"(?<=\d)\s*\*\s*(?=\d)", " · ", raw)
     # code spans are literal: hold them aside so no other rule rewrites their bytes
     raw = _CODE_RE.sub(lambda m: _stash(f"<code>{m.group(1)}</code>"), raw)
     out = _CITE_RE.sub(r'<sup class="cite"><a href="#src-\1">\1</a></sup>', raw)
@@ -140,7 +182,43 @@ def _inline(text: str) -> str:
     return out
 
 
-_MATH_FUNCS = re.compile(r"\b(log|ln|exp|max|min|sup|inf|lim|E|Pr|gcd|mod)\b")
+_MATH_FUNCS = re.compile(r"\b(log|ln|exp|max|min|sup|inf|lim|Pr|gcd|mod|sin|cos|tan|softmax)"
+                         r"(?![A-Za-z0-9])")
+
+# The model writes worked arithmetic, not LaTeX: `1.0*0.9`, `cat . dog`, `->`. Printed as-is
+# in an italic run it reads like a sentence with asterisks in it, so the operators are set.
+_MATH_OPERATORS = (
+    (re.compile(r"(?<=[\d)\]])\s*-\s*(?=\d)"), " − "),     # 0.90 - 0.20, not a hyphen
+    (re.compile(r"(?:(?<=[\s(\[{])|^)-(?=\s*\d)"), "−"),     # -0.4, - 0.20, 10^{-2}
+    (re.compile(r"(?<=\d)\s*-\s*(?=\d)"), " − "),          # 10000-2k, 1.0-0.4
+    (re.compile(r"\s*(?:\*|×)\s*"), " · "),
+    (re.compile(r"(?<=\d)\s*\*\s*(?=\d)"), " · "),        # 1.095*0.954 inside a sentence
+    (re.compile(r"\s+[.·]\s+"), " · "),          # `cat . dog`, but not the 1.0 decimal point
+    (re.compile(r"\s*->\s*|\s*→\s*"), " → "),
+    (re.compile(r"\s*<-\s*|\s*←\s*"), " ← "),
+    (re.compile(r"\s*>=\s*"), " ≥ "),
+    (re.compile(r"\s*<=\s*"), " ≤ "),
+    (re.compile(r"\s*!=\s*"), " ≠ "),
+)
+
+
+def _math_operators(text: str) -> str:
+    for pattern, replacement in _MATH_OPERATORS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _italic_variables(html_text: str) -> str:
+    """A lone letter is a variable and goes italic; a word (`cat`, `cos`) stays roman.
+
+    Tags survive untouched, so `W<sub>Q</sub>` italicises the W and the Q and nothing else.
+    """
+    parts = re.split(r"(<[^>]+>)", html_text)
+    for index, part in enumerate(parts):
+        if part.startswith("<"):
+            continue
+        parts[index] = re.sub(r"(?<![A-Za-z0-9])([A-Za-z])(?![A-Za-z0-9])", r"<i>\1</i>", part)
+    return "".join(parts)
 
 
 # A model that slips into LaTeX used to print `\frac{a}{b}` and `$\alpha$` literally on the
@@ -245,13 +323,80 @@ def _detex(text: str, *, display: bool = False) -> str:
 
 
 def _math(text: str) -> str:
-    """Escape, then upright function names and sub/sup (function names first, so a
-    generated <sup> tag is never mistaken for the word "sup")."""
-    out = _detex(html.escape(_TAG_RE.sub("", text or ""), quote=False), display=True)
-    out = _MATH_FUNCS.sub(r'<span class="fn">\1</span>', out)
+    """Plain-text math -> an upright run with function names, sub/sup and italic variables."""
+    raw = _math_operators(_TAG_RE.sub("", text or ""))
+    out = _detex(html.escape(raw, quote=False), display=True)
+    # hold function names aside so the variable pass cannot italicise `cos` or `softmax`
+    held: list = []
+
+    def _keep(match: re.Match) -> str:
+        held.append(match.group(1))
+        return f"\x01fn{len(held) - 1}\x01"
+
+    out = _MATH_FUNCS.sub(_keep, out)
     out = _bare_scripts(out)
     out = _scripts(out, aggressive=True)
+    out = _italic_variables(out)
+    for index, name in enumerate(held):
+        out = out.replace(f"\x01fn{index}\x01", f'<span class="fn">{name}</span>')
     return f'<span class="m">{out}</span>'
+
+def _split_stages(text: str) -> list:
+    """Split `a = b = c` into stages, but only on `=` outside brackets and never on prose.
+
+    `(|A| = 256 for byte-level)` is a parenthetical, not a derivation; `Round 1 over {...}, c
+    = 1 each:` is a sentence. Both stay on one row.
+    """
+    stages, current, depth = [], [], 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        if depth == 0 and text.startswith(" = ", index):
+            stages.append("".join(current).strip())
+            current = []
+            index += 3
+            continue
+        current.append(char)
+        index += 1
+    stages.append("".join(current).strip())
+    stages = [stage for stage in stages if stage]
+    if len(stages) < 2:
+        return stages
+    if len(text.split()) > 18:        # a paragraph that contains an equals sign is prose
+        return [" = ".join(stages)]
+    head = stages[0]
+    plain = head.replace(" . ", " ").replace(" · ", " ")   # a dot product is not a sentence end
+    if len(head) > 32 or "." in plain or len(plain.split()) > 5:
+        return [" = ".join(stages)]        # a sentence that happens to contain an equals sign
+    return stages
+
+
+def _math_line(text: str) -> str:
+    """One source line -> one or more aligned rows.
+
+    `cat . dog = 1.0·0.9 + … = 0.90 + 0.02 + 0.12 = 1.04` is a chain of stages; printed as one
+    row it wraps mid-expression and the working is lost. Each stage gets its own row, the
+    `=` signs share a column, and a reader can follow the arithmetic down the page.
+    """
+    stages = _split_stages(text.strip())
+    if not stages:
+        return ""
+    if len(stages) == 1:                       # a bare expression: one row, no sign
+        return (f'<span class="m-lhs"></span><span class="m-eq"></span>'
+                f'<span class="m-rhs">{_math(stages[0])}</span>')
+    rows = [(stages[0], stages[1])]
+    rows.extend(("", stage) for stage in stages[2:4])   # at most four stages per source line
+    if len(stages) > 4:                                 # keep the tail rather than drop it
+        rows[-1] = ("", " = ".join(stages[3:]))
+    return "".join(
+        f'<span class="m-lhs">{_math(lhs)}</span>'
+        f'<span class="m-eq">=</span>'
+        f'<span class="m-rhs">{_math(rhs)}</span>'
+        for lhs, rhs in rows)
 
 
 _IDX_RE = re.compile(r"^\s*(?:\d+[.)]|[-\*•—–])\s*")
@@ -324,9 +469,13 @@ def _block(block: Dict[str, Any]) -> str:
         lines = [line.strip() for line in str(block.get("md", "")).split("\n") if line.strip()]
         if not lines:
             return ""
-        return ('<div class="mathblock">'
-                + "".join(f'<div class="mathline">{_math(line)}</div>' for line in lines)
-                + "</div>")
+        parts = []
+        for line in lines:
+            if len(line.split()) > 18:           # commentary, not a formula
+                parts.append(f'<div class="math-note">{_inline(line)}</div>')
+            else:
+                parts.append(f'<div class="mathline">{_math_line(line)}</div>')
+        return '<div class="mathblock">' + "".join(parts) + "</div>"
     if kind == "aside":
         return f'<aside class="aside">{_paras(block.get("md", ""))}</aside>'
     if kind == "analogy":
@@ -759,7 +908,9 @@ p{margin:0 0 1.05rem;text-wrap:pretty}
 strong{font-weight:600}
 code{font-family:var(--mono);font-size:.88em;background:var(--surface);padding:.12em .38em;
   border-radius:5px;border:1px solid var(--line)}
-.m{font-style:italic;letter-spacing:.01em;white-space:nowrap}
+/* math is upright by default (it is arithmetic, not emphasis); only lone variables italic */
+.m{font-style:normal;letter-spacing:0;white-space:nowrap;font-variant-numeric:tabular-nums}
+.m i{font-style:italic;padding-right:.02em}
 .m sub,.m sup{font-size:.68em;font-style:normal}
 .m .fn{font-style:normal;letter-spacing:0}
 /* sub/sup outside a math block: a figure label or a symbol named in prose */
@@ -776,7 +927,6 @@ sub,sup{font-size:.72em;line-height:0}
 .m .dlg{display:inline-block;transform:scaleY(2.2);transform-origin:center;line-height:1}
 .mathblock{overflow-x:auto}
 .mathblock .m{white-space:normal}
-.mathline+.mathline{margin-top:.35rem}
 .cite a{text-decoration:none;font-family:var(--mono);font-size:.62em;color:var(--accent2);
   padding:0 .08em;margin-left:.06em;vertical-align:super;line-height:1;
   border-bottom:1px solid color-mix(in srgb,var(--accent2) 45%,transparent)}
@@ -806,7 +956,18 @@ html[data-level="advanced"] .lv-advanced{display:block;animation:fo var(--motion
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 /* blocks */
-.mathblock{font-size:1.3rem;padding:1.1rem 0;text-align:center;color:var(--ink)}
+/* a derivation is a table of rows: every line shares the three columns, so the = signs line
+   up and a long right-hand side wraps under itself instead of starting over at the margin */
+.mathblock{font-size:1.24rem;line-height:1.62;padding:1.2rem 0;color:var(--ink);
+  display:grid;grid-template-columns:max-content min-content minmax(0,1fr);
+  column-gap:.55rem;row-gap:.34rem;align-items:baseline}
+.mathline{display:contents}
+.mathblock .m{white-space:normal}
+.m-lhs{text-align:right;color:var(--ink)}
+.m-eq{color:var(--muted);padding:0 .1rem}
+.m-rhs{min-width:0;overflow-wrap:normal;word-break:normal;text-align:left}
+.math-note{grid-column:1/-1;font-size:.92rem;line-height:1.62;color:var(--muted);
+  margin:.35rem 0 .1rem;max-width:52ch}
 .aside{font-size:.92rem;color:var(--muted);border-left:1px solid var(--line);padding-left:1rem;margin:1.4rem 0}
 .analogy,.callout{background:var(--surface);border-radius:12px;padding:1.1rem 1.2rem;margin:1.5rem 0;
   border-left:3px solid var(--accent2)}
