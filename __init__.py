@@ -441,11 +441,16 @@ def _build_course(ctx, args: dict) -> dict:
     # location outside plugin-data) and re-opening the same URL reuses the tab.
     pane_open = _open_in_pane(ctx, Path(mirror) if mirror else html_path, clean["title"])
 
+    # how much explanation each depth actually carries: a thin build should be visible
+    # without opening the page
+    words = {level: sum(renderer._level_words(section, level) for section in clean["sections"])
+             for level in ("novice", "intermediate", "advanced")}
     result = {
         "ok": True,
         "slug": clean["slug"],
         "title": clean["title"],
         "sections": len(clean["sections"]),
+        "words": words,
         "level": clean["default_level"],
         "language": clean["language"],
         "identity": identity,
@@ -460,7 +465,7 @@ def _build_course(ctx, args: dict) -> dict:
         "pane": pane_open,
     }
     _record_build({k: result[k] for k in ("ok", "slug", "title", "sections", "source",
-                                          "researched", "bytes")})
+                                          "researched", "bytes", "words")})
     return result
 
 

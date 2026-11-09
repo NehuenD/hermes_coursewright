@@ -288,6 +288,17 @@ def _fmt_duration(seconds: Any) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def _level_words(section: Dict[str, Any], level: str) -> int:
+    """Prose words in one depth of a section, for the reading-time estimate."""
+    blocks = ((section.get("levels") or {}).get(level) or {}).get("blocks") or []
+    total = 0
+    for block in blocks:
+        text = (block.get("md") or " ".join(str(i) for i in (block.get("items") or []))
+                or block.get("code") or "")
+        total += len(re.sub(r"<[^>]+>", " ", str(text)).split())
+    return total
+
+
 # --------------------------------------------------------------------------
 # blocks
 # --------------------------------------------------------------------------
@@ -1331,8 +1342,10 @@ def render(spec: Dict[str, Any]) -> str:
         f'<span class="t">{_inline(s["title"])}</span></a></li>'
         for i, s in enumerate(spec["sections"]))
     outcomes = "".join(f"<li>{_inline(o)}</li>" for o in spec["outcomes"])
-    words = sum(len(_TAG_RE.sub("", "".join(b.get("md", "") for lv in s["levels"].values() for b in lv["blocks"])).split())
-                for s in spec["sections"])
+    # the reading time is for the depth the page opens at, not for all three levels at once
+    opening = spec.get("default_level")
+    opening = opening if opening in ("novice", "intermediate", "advanced") else "intermediate"
+    words = sum(_level_words(section, opening) for section in spec["sections"])
     minutes = max(4, round(words / 190))
     level_labels = (("novice", "Novice"), ("intermediate", "Intermediate"), ("advanced", "Advanced"))
     seg = "".join(f'<button type="button" data-level="{key}" aria-pressed="false">{label}</button>'

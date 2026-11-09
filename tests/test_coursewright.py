@@ -402,6 +402,66 @@ class TestCommands(StoreCase):
 
 
 # --------------------------------------------------------------------------
+# author: substance, not summaries
+# --------------------------------------------------------------------------
+class TestSectionSubstance(unittest.TestCase):
+    """The course exists to explain, so the gate checks explanation, not just shape."""
+
+    FILLER = {"blocks": [{"kind": "prose", "md": "A tokenizer turns text into numbers."},
+                         {"kind": "callout", "tone": "insight", "md": "This matters a lot."}]}
+
+    def _section(self, levels=None):
+        body = levels or {lvl: dict(self.FILLER) for lvl in
+                          ("novice", "intermediate", "advanced")}
+        return {"id": "s1", "title": "S", "levels": body,
+                "exercise": {"kind": "mcq", "prompt": "q", "choices": ["a", "b", "c", "d"],
+                             "answer": 0}}
+
+    def test_a_summary_fails_the_gate(self):
+        problems = author._section_problems(self._section())
+        self.assertTrue(any("words is a summary" in p for p in problems))
+        self.assertTrue(any("no worked example" in p for p in problems))
+
+    def test_an_explained_section_passes(self):
+        long_prose = {"kind": "prose", "md": " ".join(["word"] * 400)}
+        example = {"kind": "steps", "items": ["text: newest", "merge (e,s) -> es",
+                                             "ids: [78, 101, 119, 5612]"]}
+        body = {lvl: {"blocks": [long_prose, example]} for lvl in
+                ("novice", "intermediate", "advanced")}
+        section = self._section(body)
+        section["visual"] = {"type": "flow", "steps": ["text", "ids"]}
+        self.assertEqual(author._section_problems(section), [])
+
+    def test_prompt_carries_the_example_and_the_recap(self):
+        plan = {"title": "T", "thesis": "th", "language": "en", "sections": [
+            {"title": "One", "teaches": "the first mechanism", "hook": "", "eyebrow": "",
+             "example": "newest -> [263]"},
+            {"title": "Two", "teaches": "the second mechanism", "hook": "", "eyebrow": "",
+             "example": "three vectors and a softmax"},
+        ]}
+        instructions, _payload = author._section_prompt(plan, 1, 2, "en")
+        self.assertIn("three vectors and a softmax", instructions)
+        self.assertIn("the first mechanism", instructions)          # recap of section 1
+        self.assertIn("350-500", instructions)                      # the length contract
+        self.assertIn("Define before use", instructions)
+        self.assertIn("worked example", instructions)
+
+    def test_plan_keeps_the_example_field(self):
+        class Llm:
+            @staticmethod
+            def complete_structured(**kw):
+                payload = {"slug": "s", "title": "T", "subtitle": "", "thesis": "t",
+                           "outcomes": [], "identity": {},
+                           "sections": [{"title": f"S{i}", "eyebrow": "", "hook": "",
+                                         "teaches": "a real mechanism, two sentences.",
+                                         "example": f"case {i}"} for i in range(6)]}
+                return type("R", (), {"parsed": payload, "text": ""})()
+
+        plan = author.plan_course(type("Ctx", (), {"llm": Llm()})(), topic="t")
+        self.assertEqual(plan["sections"][2]["example"], "case 2")
+
+
+# --------------------------------------------------------------------------
 # author: assembly
 # --------------------------------------------------------------------------
 class TestAssemble(unittest.TestCase):
@@ -457,6 +517,24 @@ class TestPage(unittest.TestCase):
         page = self._page()
         self.assertIn("no bridge — copied to clipboard", page)
         self.assertIn("clipboard refused", page)
+
+    def test_reading_time_follows_the_opening_depth(self):
+        def page(default_level):
+            raw = {"slug": "p", "title": "T", "language": "en", "default_level": default_level,
+                   "identity": {}, "outcomes": [],
+                   "provenance": {"researched": False, "finders": [], "readers": [], "sources": [],
+                                  "failures": [], "warnings": [], "generated": ""},
+                   "resources": {"videos": [], "reading": []},
+                   "sections": [{"id": "s1", "title": "S", "levels": {
+                       "novice": {"blocks": [{"kind": "prose", "md": " ".join(["w"] * 100)}]},
+                       "intermediate": {"blocks": [{"kind": "prose", "md": " ".join(["w"] * 900)}]},
+                       "advanced": {"blocks": [{"kind": "prose", "md": " ".join(["w"] * 1900)}]},
+                   }}]}
+            clean, _ = spec.validate(raw)
+            return render.render(clean)
+
+        self.assertIn("~4 min", page("novice"))
+        self.assertIn("~10 min", page("advanced"))
 
     def test_level_change_redraws_figures(self):
         page = self._page()

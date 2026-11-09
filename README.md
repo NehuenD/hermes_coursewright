@@ -40,10 +40,29 @@ The tools are synchronous, so a build the agent calls shows as a long tool call.
 Each build writes `$HERMES_HOME/plugin-data/coursewright/courses/<slug>/index.html` and a
 copy in `~/Courses/<slug>/`, with the spec and the research record beside the page.
 
+## What a level has to contain
+
+Each section is written three times, and none of the three is a summary. Every level runs the
+same arc: what problem this part solves, the mechanism step by step, the worked example walked
+through with its real values, and what it costs or where it fails. The budgets are there so the
+explanation has room:
+
+| level | words | blocks |
+|---|---|---|
+| novice | 350-500 | 5-7 |
+| intermediate | 500-700 | 6-8 |
+| advanced | 550-800 | 6-8 |
+
+`author.py` enforces the parts a page cannot fake: a level under 300 words is sent back once,
+and so is a level with no `steps`, `code`, `math` or `timeline` block — that block is where the
+worked example lives. The planner gives each section a `teaches` (the mechanism, and the thing
+readers get wrong) and an `example` (the concrete case: the actual text, numbers or code), so
+the writer starts from a spine instead of a title.
+
 ## How a course gets written
 
-1. Plan. One model call returns the title, thesis, outcomes, section briefs and a page
-   identity.
+1. Plan. One model call returns the title, thesis, outcomes, section briefs — each with the
+   mechanism it establishes and the worked example it will carry — and a page identity.
 2. Research. Find, read and watch, with each rung probed before use.
 3. Draft. One call per section. Each call gets the outline and the numbered source
    excerpts, so a claim can point back with a `[n]` marker to the page it came from.
@@ -60,9 +79,15 @@ copy in `~/Courses/<slug>/`, with the spec and the research record beside the pa
 | watch | `yt-dlp` | videos with captions and a poster |
 | fallback | Wikipedia, arXiv, Stack Exchange | sources when search returns nothing, no key needed |
 
-A four section course costs one plan call and four draft calls, takes about five minutes on
-a laptop, and produces a page near 95 KB with posters inlined. The planner is asked for 6-8
-sections and the builder keeps all eight: the closing section a plan asks for is not dropped.
+A four section course costs one plan call and four draft calls; an eight section course lands
+near 160 KB with posters inlined and takes roughly ten to twenty minutes, depending on the
+model. The planner is asked for 6-8 sections and the builder keeps all eight: the closing
+section a plan asks for is not dropped.
+
+Depth is not padding: the drafting call gets a section spine (what it establishes, and the
+worked example it carries) and the length budget to use it. An eight section course measures
+about 4,000 words at novice, 4,800 at intermediate and 5,400 at advanced — a short book, not a
+leaflet — and every level walks at least one example through its actual values.
 
 ## Configuration
 

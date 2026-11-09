@@ -28,7 +28,7 @@ except ImportError:  # direct import during development
 logger = logging.getLogger(__name__)
 
 MAX_SECTIONS = 8
-_SECTION_TOKENS = 2200
+_SECTION_TOKENS = 5000
 _PLAN_TOKENS = 1400
 
 BLOCK_MENU = """Available block kinds (use several different ones; never invent a kind):
@@ -55,24 +55,39 @@ FIGURE_MENU = """{"type":"flow","steps":["token id","embedding","attention head"
        process. Data charts only for numbers you genuinely have — never invent data."""
 
 LEVEL_RULES = """LEVEL RULES — this is the whole point of the course. The three versions must NOT be
-the same text at different lengths.
+the same text at different lengths, and none of them is a summary. Each level is a complete
+explanation for its reader.
 
-novice:
-- No jargon at all. If a technical word is unavoidable, explain it in the same sentence.
-- Lead with a concrete image or analogy, not a definition.
-- Short sentences. Short paragraphs. 2-3 blocks.
-- A reader with no background must be able to follow it out loud.
+Every level runs the same arc, in this order:
+(1) what problem this part solves, in one or two sentences, before any name appears;
+(2) the mechanism, step by step: what goes in, what each step does to it, what comes out;
+(3) the worked example (given below), carried through with real text, real numbers or
+    runnable code, read out step by step — not gestured at;
+(4) what it costs or where it fails, with the reason.
 
-intermediate:
-- The real terms, each introduced the moment the reader needs it (definition block).
-- The mechanism: why it works, not just what it does. 2-4 blocks.
-- One honest limit or edge case.
+novice (350-500 words, 5-7 blocks):
+- No jargon until the mechanism is on the table. When a term is unavoidable, define it in the
+  same sentence in plain words: "the tokenizer — the rule that cuts text into pieces".
+- The worked example is the spine. Start from a sentence the reader already knows, show it
+  being cut into pieces, show the pieces becoming numbers. Real strings, real-looking numbers.
+- Short sentences. Explain more things, not fewer.
 
-advanced:
-- Proper terminology used without apology; precise statements.
-- Name the standard results and who owns them when you are sure. Say plainly what is
-  contested or open (a callout with tone "honesty" is a good home for that).
-- 2-4 blocks. This is where math/code/comparison belong."""
+intermediate (500-700 words, 6-8 blocks):
+- The real terms, each defined the first time it appears, in a sentence that says what it
+  does — not what it is called.
+- The mechanism at the level of quantities: sizes, dimensions, what is multiplied by what,
+  what order things happen in.
+- The worked example developed past the novice version: intermediate values, and one case
+  where the design choice visibly matters.
+- One honest limit, with the reason it exists. 6-8 blocks.
+
+advanced (550-800 words, 6-8 blocks):
+- Precise statements; every symbol defined before it is used; math or code a reader could
+  check or run.
+- Why the design works and what it buys, naming the standard result and its author when sure.
+- Where it breaks, what is contested, what is still open — with the specific reason, not the
+  word "complex".
+- One sentence that sets up the next section."""
 
 HARD_RULES = """HARD RULES:
 - Never invent a citation, URL, DOI, page number, ISBN, or direct quotation. Naming a
@@ -80,15 +95,28 @@ HARD_RULES = """HARD RULES:
 - Math is plain text, in every block and in figure labels: a subscript is an underscore after
   the base (W_Q), a superscript a caret (K^T), and a multi-character script is wrapped in curly
   braces. Never LaTeX, never dollar signs, never HTML — anything else prints literally.
-- No block may exceed 70 words. A section may not exceed 240 words per level.
+- Length: a block is at most 200 words; a level is 350-800 words as its rule above says. A
+  level under 300 words is a failure — it means the mechanism was named, not explained.
+- Define before use. The first time a technical term appears in a level, the same sentence
+  must say what it does to the data. "The tokenizer" on its own is a label, not teaching.
+- Never name a mechanism without showing it operate: what goes in, what changes, what comes
+  out. If you cannot say what it does to the input, do not name it.
+- Every level carries this section's worked example — real text, real numbers, or code — and
+  reads it through. An analogy may support it; an analogy may not replace it.
+- No filler. A checkpoint, aside or callout never stands in for the mechanism; at most one
+  checkpoint, at the end of a level.
+- Delete any sentence that would still be true of a different subject ("this matters because
+  it affects quality"). Prefer the number, the mechanism, or the failure.
 - Write in {language}.
 - Do not mention that you are an AI, do not address the reader's level, do not write
   "in this section we will" — just teach."""
 
 _EXERCISE_RULES = """Exercise: exactly one per section. Choose ONE kind:
 - {"kind":"mcq","prompt":"...","choices":["A","B","C","D"],"answer":0,"why":"why the right one is right, one or two sentences"}
-  (exactly 4 choices, answer is the 0-based index of the correct one, the distractors must
-  be plausible mistakes, not nonsense)
+  (exactly 4 choices, answer is the 0-based index of the correct one. Test the mechanism,
+  not the vocabulary: give this section's example a twist and ask what happens to it. Each
+  distractor must be a mistake the mechanism predicts — what a reader who half-understood
+  it would answer — never an obviously wrong option)
 - {"kind":"recall","prompt":"...","rubric":["keyword1","keyword2","keyword3"],"answer":"a model answer in 2-3 sentences"}
   (rubric = 3-6 single words a good answer would contain; keep them lowercase)"""
 
@@ -167,7 +195,7 @@ def _ask(ctx, *, instructions: str, payload: str, purpose: str, max_tokens: int,
             purpose=purpose,
             temperature=0.4,
             max_tokens=max_tokens,
-            timeout=180,
+            timeout=300,
         )
     except Exception as exc:  # trust gate, provider error, timeout
         logger.warning("coursewright: %s call failed: %s", purpose, exc)
@@ -194,7 +222,8 @@ Return ONE JSON object:
   "outcomes": ["verb-first, 4 max", "..."],
   "sections": [
     {"title": "...", "eyebrow": "2-3 words", "hook": "one line: why this section matters",
-     "teaches": "one sentence: the one thing this section establishes"}
+     "teaches": "2-3 sentences: the mechanism this section establishes, and the one thing a reader gets wrong about it",
+     "example": "the concrete case this section will work through — the actual text, numbers or code, with its intermediate values"}
   ],
   "identity": {"palette": "...", "type_pairing": "...", "layout": "...", "motion": "...",
                "rationale": "half a sentence: why this visual mood fits the subject"}
@@ -253,7 +282,9 @@ def plan_course(ctx, *, topic: str, level: str = "intermediate", language: str =
             "title": str(item.get("title"))[:120],
             "eyebrow": str(item.get("eyebrow") or "")[:40],
             "hook": str(item.get("hook") or "")[:200],
-            "teaches": str(item.get("teaches") or "")[:300],
+            # the section's spine: what it establishes and the case it works through
+            "teaches": str(item.get("teaches") or "")[:700],
+            "example": str(item.get("example") or "")[:300],
         })
     if len(planned) < min(3, requested or 3):
         return _fallback_plan(topic, language)
@@ -288,7 +319,7 @@ def _fallback_plan(topic: str, language: str) -> Dict[str, Any]:
         "thesis": "",
         "outcomes": [],
         "sections": [{"title": topic, "eyebrow": "", "hook": "",
-                      "teaches": f"an introduction to {topic}"}],
+                      "teaches": f"an introduction to {topic}", "example": ""}],
         "identity": tokens.resolve({}),
         "language": language,
         "degraded": "The planning call failed; this plan is a placeholder.",
@@ -302,6 +333,11 @@ def _section_prompt(plan: Dict[str, Any], index: int, total: int, language: str,
                     sources: str = "") -> tuple[str, str]:
     section = plan["sections"][index]
     guide = "\n".join(f"{i + 1}. {s['title']} — {s['teaches']}" for i, s in enumerate(plan["sections"]))
+    recap = ""
+    if index:
+        previous = plan["sections"][index - 1]
+        recap = (f"\nThe section just before this one, \"{previous['title']}\", established: "
+                 f"{previous['teaches'][:320]}\nBuild on it; assume the reader has read it.\n")
     sources_block = ""
     if sources:
         sources_block = f"""
@@ -320,11 +356,15 @@ CITATION RULES:
     # examples, and brace escaping differs enough across interpreters to be a trap.
     template = """You are writing section <<N>> of <<TOTAL>> of a course called
 "<<TITLE>>". The course's argument: <<THESIS>>
-
+<<RECAP>>
 The whole course, in order (do not write the other sections):
 <<GUIDE>>
 <<SOURCES>>
 Write THIS section: "<<SECTION>>" — its job is: <<TEACHES>>
+Its worked example: <<EXAMPLE>>
+Carry that example through all three levels, adding detail at each depth. If it does not fit
+what the section teaches, improve it — but the section still has one concrete case, walked
+through with its actual values.
 
 Return ONE JSON object:
 {
@@ -363,7 +403,18 @@ so give this one the kind it is told to have.
 <<HARD_RULES>>
 
 Use 3 or more different block kinds across the three levels of this section. Vary the figure
-type between sections: do not give every section the same kind of figure."""
+type between sections: do not give every section the same kind of figure.
+
+BEFORE YOU ANSWER, check every level against this list. Fix what fails; do not report it.
+- Could a reader who has never seen this subject predict what happens to the example input
+  after reading the level? If not, the mechanism is missing and the level is not finished.
+- Is every technical term defined where it first appears, in words that do not assume it?
+- Does the level walk the worked example through with real text, numbers or code — showing
+  intermediate values, not only the input and the output?
+- Is any sentence still true if you swap the subject for a different one? Replace it with the
+  number, the mechanism, or the failure.
+- Are the lengths inside the ranges (novice 350-500, intermediate 500-700, advanced 550-800
+  words)? A level under 300 words is not finished."""
     instructions = (template
                     .replace("<<N>>", str(index + 1))
                     .replace("<<TOTAL>>", str(total))
@@ -373,6 +424,9 @@ type between sections: do not give every section the same kind of figure."""
                     .replace("<<SOURCES>>", sources_block)
                     .replace("<<SECTION>>", str(section["title"]))
                     .replace("<<TEACHES>>", str(section["teaches"]))
+                    .replace("<<RECAP>>", recap)
+                    .replace("<<EXAMPLE>>", str(section.get("example") or "none given — choose one "
+                                                        "concrete case and carry it through"))
                     .replace("<<LEVEL_RULES>>", LEVEL_RULES)
                     .replace("<<BLOCK_MENU>>", BLOCK_MENU.replace("{FIGURES}", FIGURE_MENU))
                     .replace("<<EXERCISE_RULES>>", _EXERCISE_RULES)
@@ -457,8 +511,18 @@ def _thin_section(brief: Dict[str, Any], index: int, why: str) -> Dict[str, Any]
     }
 
 
+_MIN_LEVEL_WORDS = {"novice": 260, "intermediate": 360, "advanced": 360}
+_CONCRETE_KINDS = {"steps", "code", "math", "timeline", "comparison"}
+
+
+def _block_words(block: Dict[str, Any]) -> int:
+    text = block.get("md") or " ".join(str(i) for i in (block.get("items") or [])) \
+        or block.get("code") or ""
+    return len(re.findall(r"[\w'’-]+", str(text)))
+
+
 def _section_problems(section: Dict[str, Any]) -> List[str]:
-    """Cheap structural checks worth one retry."""
+    """Cheap structural checks worth one retry — including whether it actually taught."""
     problems: List[str] = []
     for level in ("novice", "intermediate", "advanced"):
         body = section.get("levels", {}).get(level) or {}
@@ -469,6 +533,16 @@ def _section_problems(section: Dict[str, Any]) -> List[str]:
         kinds = {str((b or {}).get("kind", "")).strip() for b in blocks if isinstance(b, dict)}
         if not kinds:
             problems.append(f"{level}: blocks have no kinds")
+        # a level that names the mechanism without explaining it is the failure this course
+        # exists to avoid, so length and a walked example are part of the contract
+        words = sum(_block_words(b) for b in blocks if isinstance(b, dict))
+        floor = _MIN_LEVEL_WORDS[level]
+        if words < floor:
+            problems.append(f"{level}: {words} words is a summary, not an explanation — "
+                            f"at least {floor}, with the mechanism and the worked example")
+        if not any(isinstance(b, dict) and b.get("kind") in _CONCRETE_KINDS for b in blocks):
+            problems.append(f"{level}: no worked example — the example needs a steps, code, "
+                            f"math or timeline block carrying its actual values")
         for block in blocks:
             if not isinstance(block, dict):
                 continue
