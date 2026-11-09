@@ -131,6 +131,10 @@ BUILD_SCHEMA = {
                              "description": f"How many sections to draft (cap {_MAX_SECTIONS_BUILT})."},
             "refresh": {"type": "boolean",
                         "description": "Ignore the cached research for this topic and search again."},
+            "background": {"type": "boolean",
+                           "description": ("Start the build and return at once; the finished course is "
+                                           "posted to this chat when it lands. Use this for a full "
+                                           "course: a deep build takes longer than a tool call may run.")},
         },
         "required": [],
     },
@@ -271,6 +275,67 @@ def _draft_all(ctx, plan: dict, language: str, max_sections: int, sources: str =
     return sections
 
 
+def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "") -> dict:
+    """Run the build on a worker thread and post the result when it lands.
+
+    A deep course (eight sections, three depths each) runs for longer than a tool call is
+    allowed to block, so the caller gets an immediate answer and the chat gets the finished
+    course as a message. The caller must already own *guard*; this releases it.
+    """
+    key = _topic_key(topic) or guard
+
+    def _worker() -> None:
+        try:
+            result = _build_course(ctx, dict(args))
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or "the build refused"))
+            message = (f"Your course is ready: \"{result['title']}\", "
+                       f"{result['sections']} sections, {result['bytes'] // 1024} KB, "
+                       f"opens at {result['level']}.\n"
+                       f"{result['html']}"
+                       + (f"\n\n{result['preview']}" if result.get("preview") else ""))
+        except Exception as exc:  # a background failure must still reach the user
+            logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
+            _record_build({"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                           "topic": topic, "args": dict(args)})
+            message = f"The course on \"{topic}\" failed: {type(exc).__name__}: {exc}"
+        finally:
+            with _BUILD_LOCK:
+                _ACTIVE.pop(key, None)
+            _release_build(guard)
+        # Post first: it appends the message without pretending to be user input.
+        handle = ctx.post_message(message)
+        if getattr(handle, "ok", False):
+            logger.info("coursewright: posted build result for %r", topic)
+            return
+        logger.warning("coursewright: post refused (%s) for %r; injecting instead",
+                       getattr(handle, "error", "unknown"), topic)
+        try:  # a refused post still has to reach the user somehow
+            ctx.inject_message(message, role="user", session_key=session_key)
+        except Exception as exc:
+            logger.warning("coursewright: inject fallback failed: %s", exc)
+
+    # post_message resolves the chat through a contextvar bound by the dispatcher;
+    # a bare thread does not inherit it, so carry the context across.
+    thread = threading.Thread(target=contextvars.copy_context().run, args=(_worker,),
+                              name=f"coursewright-{key[:24]}", daemon=True)
+    with _BUILD_LOCK:
+        _ACTIVE[key] = thread
+    _record_build({"ok": None, "running": True, "topic": topic, "args": dict(args)})
+    try:
+        thread.start()
+    except Exception:  # a thread that cannot start must not hold the topic forever
+        with _BUILD_LOCK:
+            _ACTIVE.pop(key, None)
+        _release_build(guard)
+        raise
+    return {"ok": True, "started": True, "background": True, "topic": topic,
+            "slug": None, "sections": 0,
+            "message": (f"Building \"{topic}\" in the background. It takes roughly one to two "
+                        f"minutes per section at this depth; the finished course will be posted "
+                        f"here, and `/courses` shows what is on disk meanwhile.")}
+
+
 def build_course(ctx, args: dict) -> dict:
     """One build per topic at a time; a second caller is refused instead of racing the first."""
     topic = str(args.get("topic") or "").strip()
@@ -279,6 +344,8 @@ def build_course(ctx, args: dict) -> dict:
         return {"ok": False,
                 "error": f"a build for {topic or guard!r} is already running here; wait for it to "
                          f"finish, or run /courses to see what is on disk"}
+    if args.get("background"):
+        return _spawn_build(ctx, args, guard, topic, _calling_session_key({}))
     try:
         return _build_course(ctx, args)
     finally:
@@ -541,9 +608,14 @@ def course_status(ctx, args: dict) -> dict:
         except OSError:
             return 0
     rows = _inventory()
+    with _BUILD_LOCK:
+        running = sorted(name for name, thread in _ACTIVE.items() if thread.is_alive())
+        claimed = sorted(key for key in _RUNNING if key not in _ACTIVE)
     payload = {
         "ok": True,
         "last_build": last,
+        "running": running,
+        "claimed": claimed,
         "courses": len(rows),
         "newest": rows[0]["slug"] if rows else None,
         "plans": _count("plans/*.json"),
@@ -652,13 +724,12 @@ _HANDOFF = """[/course] The /course command parsed this request from the chat.
 
 Build the course on {topic} at {level} depth: call coursewright_build exactly once with
 {call}
-While it runs, say one line that it is building — the tool call is where the progress shows.
+That call returns as soon as the build starts (a full course takes longer than a tool call may
+block); the plugin posts the finished course into this chat itself.
 
-When it returns: two sentences on what the course actually covers, then the file path. If the
-result carries a non-empty "preview" field, put that directive alone on its own line; if it is
-empty the course is already open in the preview pane beside the chat, so do not paste a
-directive of your own. If it returns ok:false, say plainly why and
-stop; do not retry with a different topic or a different tool."""
+Reply with one short line: what the course will cover, and that it is building now. Do not call
+the tool again and do not wait for the file. If it returns ok:false, say plainly why and stop;
+do not retry with a different topic or a different tool."""
 
 
 def _handoff_text(topic: str, args: dict) -> str:
@@ -672,6 +743,7 @@ def _handoff_text(topic: str, args: dict) -> str:
         call.append(f"language={json.dumps(str(args['language']).strip())}")
     if args.get("refresh"):
         call.append("refresh=true")
+    call.append("background=true")
     return _HANDOFF.format(topic=json.dumps(topic, ensure_ascii=False), level=_level_of(args),
                            call=", ".join(call))
 
@@ -755,52 +827,14 @@ def register(ctx) -> None:
                     f"the work and the finished course both show up here. `/courses` lists what "
                     f"already exists in the meantime.")
 
-        # Fallback when no session can be woken (no gateway, no live chat): build in the
-        # background and post the result. Refused posts are injected, and a failed build is
-        # recorded so coursewright_status can say what happened.
+        # Fallback when no session can be woken (no gateway, no live chat): build on a worker
+        # and post the result. Refused posts are injected, and a failed build is recorded so
+        # coursewright_status can say what happened.
         logger.info("coursewright: no session to hand %r to; building in the background", topic)
-
-        def _worker() -> None:
-            try:
-                result = build_course(ctx, dict(args))
-                if not result.get("ok"):
-                    raise RuntimeError(str(result.get("error") or "the build refused"))
-                message = (f"Your course is ready: \"{result['title']}\", "
-                           f"{result['sections']} sections, {result['bytes'] // 1024} KB, "
-                           f"opens at {result['level']}.\n"
-                           f"{result['html']}"
-                           + (f"\n\n{result['preview']}" if result.get("preview") else ""))
-            except Exception as exc:  # a background failure must still reach the user
-                logger.warning("coursewright: background build failed: %s", exc, exc_info=True)
-                _record_build({"ok": False, "error": f"{type(exc).__name__}: {exc}",
-                               "topic": topic, "args": dict(args)})
-                message = (f"The course on \"{topic}\" failed: {type(exc).__name__}: {exc}")
-            finally:
-                with _BUILD_LOCK:
-                    _ACTIVE.pop(key, None)
-            # Post first: it appends the message without pretending to be user input.
-            handle = ctx.post_message(message)
-            if getattr(handle, "ok", False):
-                logger.info("coursewright: posted build result for %r", topic)
-                return
-            logger.warning("coursewright: post refused (%s) for %r; injecting instead",
-                           getattr(handle, "error", "unknown"), topic)
-            try:  # a refused post still has to reach the user somehow
-                ctx.inject_message(message, role="user", session_key=session_key)
-            except Exception as exc:
-                logger.warning("coursewright: inject fallback failed: %s", exc)
-
-        # post_message resolves the chat through a contextvar bound by the dispatcher;
-        # a bare thread does not inherit it, so carry the context across.
-        thread = threading.Thread(target=contextvars.copy_context().run, args=(_worker,),
-                                  name=f"coursewright-{key[:24]}", daemon=True)
-        with _BUILD_LOCK:
-            _ACTIVE[key] = thread
-        _record_build({"ok": None, "running": True, "topic": topic, "args": dict(args)})
-        thread.start()
-        return (f"Building \"{topic}\" at {_level_of(args)} depth. It takes about five minutes, "
-                f"and the course will appear here as soon as it is done. /courses lists what "
-                f"exists in the meantime.")
+        if not _claim_build(key):
+            return (f"Already building **{topic}**. It will appear here when it lands, "
+                    f"or run `/courses` in a few minutes.")
+        return _spawn_build(ctx, dict(args), key, topic, session_key)["message"]
 
     ctx.register_command("course", _course, description="Build an interactive course on a topic",
                          args_hint="<topic> [--level=novice|intermediate|advanced]")

@@ -28,7 +28,7 @@ except ImportError:  # direct import during development
 logger = logging.getLogger(__name__)
 
 MAX_SECTIONS = 8
-_SECTION_TOKENS = 5000
+_SECTION_TOKENS = 6000
 _PLAN_TOKENS = 1400
 
 BLOCK_MENU = """Available block kinds (use several different ones; never invent a kind):
@@ -373,13 +373,15 @@ Return ONE JSON object:
   "eyebrow": "keep or improve the 2-3 word label",
   "hook": "one line that earns the next two minutes",
   "visual": null or a figure (see below),
+  "exercise": { ... },
   "levels": {
     "novice": {"blocks": [ ... ]},
     "intermediate": {"blocks": [ ... ]},
     "advanced": {"blocks": [ ... ]}
-  },
-  "exercise": { ... }
+  }
 }
+Write the exercise before the levels: a long answer that runs out of room drops whatever is
+last, and the exercise is the part that goes missing.
 
 REQUIRED STRUCTURE FOR THIS SECTION:
 - This section needs exactly one figure, in the top-level "visual" field:

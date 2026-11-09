@@ -217,6 +217,10 @@ class TestResearch(unittest.TestCase):
     def setUp(self):
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="cw-research-"))
         self.addCleanup(shutil.rmtree, self.root, True)
+        # the keyless fallback would really call Wikipedia/arXiv: tests stay offline
+        self._keyless = research._keyless_find
+        research._keyless_find = lambda topic, language: []
+        self.addCleanup(setattr, research, "_keyless_find", self._keyless)
 
     def test_empty_run_is_not_cached(self):
         empty = FakeCtx(search=lambda q: [], extract=lambda u: "")
@@ -333,6 +337,68 @@ class TestBuild(StoreCase):
         keys = re.findall(r'<section class="ex" data-kind="[^"]*" data-ex="([^"]+)"', html)
         self.assertTrue(keys)
         self.assertTrue(set(keys) <= set(ids))
+
+
+class TestBackgroundBuild(StoreCase):
+    """A deep build outlives the tool budget, so it runs off-thread and posts its result."""
+
+    def test_background_returns_at_once_and_posts_when_done(self):
+        import threading
+
+        gate = threading.Event()
+
+        class SlowLlm(FakeLlm):
+            def complete_structured(self, **kw):
+                if kw.get("purpose", "").startswith("coursewright.section."):
+                    gate.wait(timeout=10)
+                return super().complete_structured(**kw)
+
+        ctx = FakeCtx(config={"enable_research": False, "enable_videos": False,
+                              "courses_dir": ""}, llm=SlowLlm())
+        posted = []
+        ctx.post_message = lambda text: (posted.append(text), type("H", (), {"ok": True})())[1]
+
+        started = cw.build_course(ctx, {"topic": "probe topic", "max_sections": 2,
+                                        "background": True})
+        self.assertTrue(started["ok"])
+        self.assertTrue(started["background"])
+        self.assertEqual(posted, [])                       # nothing yet: it is still building
+        status = cw.course_status(ctx, {})
+        self.assertTrue(status["running"], "the running build should be visible in status")
+
+        gate.set()
+        key = cw._topic_key("probe topic")
+        for _ in range(200):
+            thread = cw._ACTIVE.get(key)
+            if thread is None:
+                break
+            thread.join(timeout=0.05)
+        self.assertEqual(len(posted), 1, "the finished course must be posted")
+        self.assertIn("Your course is ready", posted[0])
+        self.assertFalse(cw._handoff_pending(key))
+
+    def test_a_second_background_build_is_refused(self):
+        ctx = FakeCtx(config={"enable_research": False, "enable_videos": False,
+                              "courses_dir": ""})
+        import threading
+        gate = threading.Event()
+
+        class SlowLlm(FakeLlm):
+            def complete_structured(self, **kw):
+                if kw.get("purpose", "").startswith("coursewright.section."):
+                    gate.wait(timeout=10)
+                return super().complete_structured(**kw)
+
+        ctx.llm = SlowLlm()
+        first = cw.build_course(ctx, {"topic": "probe topic", "max_sections": 2, "background": True})
+        self.assertTrue(first["ok"])
+        second = cw.build_course(ctx, {"topic": "probe topic", "max_sections": 2, "background": True})
+        self.assertFalse(second["ok"])
+        self.assertIn("already running", second["error"])
+        gate.set()
+        thread = cw._ACTIVE.get(cw._topic_key("probe topic"))
+        if thread is not None:
+            thread.join(timeout=10)
 
 
 # --------------------------------------------------------------------------
@@ -535,6 +601,23 @@ class TestPage(unittest.TestCase):
 
         self.assertIn("~4 min", page("novice"))
         self.assertIn("~10 min", page("advanced"))
+
+    def test_multiline_math_keeps_its_lines(self):
+        raw = {"slug": "p", "title": "T", "language": "en", "default_level": "intermediate",
+               "identity": {}, "outcomes": [],
+               "provenance": {"researched": False, "finders": [], "readers": [], "sources": [],
+                              "failures": [], "warnings": [], "generated": ""},
+               "resources": {"videos": [], "reading": []},
+               "sections": [{"id": "s1", "title": "S", "levels": {
+                   lvl: {"blocks": [{"kind": "math",
+                                     "md": "Scores: s_{ij} = q_i · k_j / √d_k\n"
+                                           "Weights: a_{ij} = exp(s_{ij}) / Σ_j exp(s_{ij})\n"
+                                           "Output: o_i = Σ_j a_{ij} v_j"}]}
+                   for lvl in ("novice", "intermediate", "advanced")}}]}
+        clean, _ = spec.validate(raw)
+        page = render.render(clean)
+        self.assertEqual(page.count('class="mathline"'), 9)      # three lines, three depths
+        self.assertNotIn("Scores: s<sub>ij</sub> Weights:", page)
 
     def test_level_change_redraws_figures(self):
         page = self._page()

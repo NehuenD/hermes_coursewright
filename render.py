@@ -319,7 +319,14 @@ def _block(block: Dict[str, Any]) -> str:
             return f'<div class="checkpoint"><span class="cp-label">Before you move on</span>{body}</div>'
         return body
     if kind == "math":
-        return f'<div class="mathblock">{_math(block.get("md", ""))}</div>'
+        # a derivation is written one step per line; collapsing the newlines ran "Scores:",
+        # "Weights:" and "Output:" into one wrapped paragraph
+        lines = [line.strip() for line in str(block.get("md", "")).split("\n") if line.strip()]
+        if not lines:
+            return ""
+        return ('<div class="mathblock">'
+                + "".join(f'<div class="mathline">{_math(line)}</div>' for line in lines)
+                + "</div>")
     if kind == "aside":
         return f'<aside class="aside">{_paras(block.get("md", ""))}</aside>'
     if kind == "analogy":
@@ -769,6 +776,7 @@ sub,sup{font-size:.72em;line-height:0}
 .m .dlg{display:inline-block;transform:scaleY(2.2);transform-origin:center;line-height:1}
 .mathblock{overflow-x:auto}
 .mathblock .m{white-space:normal}
+.mathline+.mathline{margin-top:.35rem}
 .cite a{text-decoration:none;font-family:var(--mono);font-size:.62em;color:var(--accent2);
   padding:0 .08em;margin-left:.06em;vertical-align:super;line-height:1;
   border-bottom:1px solid color-mix(in srgb,var(--accent2) 45%,transparent)}
