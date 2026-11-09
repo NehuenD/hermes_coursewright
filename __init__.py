@@ -445,6 +445,40 @@ def _open_in_pane(ctx, path: Path, title: str) -> bool:
     return True
 
 
+def _figure_scenes(spec: dict) -> list:
+    """Every diagram/sequence figure in a spec, as (name, .excalidraw scene) pairs.
+
+    The page draws these as SVG. The scenes are the editable hand-off: a reader who wants to
+    move a box can open one at excalidraw.com. A figure block is normally repeated at all
+    three depths, so scenes are de-duplicated by content, and named for the slot they came
+    from.
+    """
+    scenes, seen = [], set()
+    for section in spec.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        sid = str(section.get("id") or "section")
+        slots = [(sid, section.get("visual"))]
+        for level in ("novice", "intermediate", "advanced"):
+            blocks = ((section.get("levels") or {}).get(level) or {}).get("blocks") or []
+            for index, block in enumerate(blocks):
+                if isinstance(block, dict) and block.get("kind") == "figure":
+                    slots.append((f"{sid}-{level}-{index + 1}", block.get("spec")))
+        for name, figure in slots:
+            if not isinstance(figure, dict):
+                continue
+            if str(figure.get("type") or "").strip().lower() not in {"diagram", "sequence"}:
+                continue
+            key = json.dumps(figure, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            scene = renderer.scene_from_figure(figure, str(figure.get("caption") or ""))
+            if scene:
+                scenes.append((name, scene))
+    return scenes
+
+
 def _build_course(ctx, args: dict) -> dict:
     topic = str(args.get("topic") or "").strip()
     plan_path = str(args.get("plan_path") or "").strip()
@@ -558,6 +592,7 @@ def _build_course(ctx, args: dict) -> dict:
 
     store = _store() / "courses" / clean["slug"]
     html_path = store / "index.html"
+    scenes = _figure_scenes(clean)
     with _build_slot(clean["slug"]) as owned:
         if not owned:
             return {"ok": False,
@@ -566,6 +601,9 @@ def _build_course(ctx, args: dict) -> dict:
                               f"wait for it to finish, or run /courses to see what is on disk")}
         _write(html_path, page)
         _write(store / "spec.json", json.dumps(clean, indent=2, ensure_ascii=False))
+        for name, scene in scenes:
+            _write(store / "figures" / f"{name}.excalidraw",
+                   json.dumps(scene, indent=2, ensure_ascii=False))
         if origin == "model" and record is not None:
             _write(store / "research.json", json.dumps(record, indent=2, ensure_ascii=False))
 
@@ -575,6 +613,9 @@ def _build_course(ctx, args: dict) -> dict:
         try:
             target = Path(mirror_root).expanduser() / clean["slug"] / "index.html"
             _write(target, page)
+            for name, scene in scenes:
+                _write(target.parent / "figures" / f"{name}.excalidraw",
+                       json.dumps(scene, indent=2, ensure_ascii=False))
             mirror = str(target)
         except OSError as exc:
             warnings.append(f"mirror copy failed: {exc}")
@@ -611,6 +652,7 @@ def _build_course(ctx, args: dict) -> dict:
         "source": origin,
         "researched": clean["provenance"]["researched"],
         "bytes": len(page.encode("utf-8")),
+        "diagrams": len(scenes),
         "warnings": warnings,
         # `::preview{...}` is desktop-only syntax: anywhere else it is a line of text the user
         # has to delete, so those surfaces get the path and a command instead

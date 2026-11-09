@@ -136,12 +136,21 @@ at once, across processes as well as threads.
   switching moves nothing on screen.
 - Figures sit in a shared slot above the levels, so a novice sees the diagram an advanced
   reader sees.
+- Figures are drawn, not pasted. A `diagram` (layered graph: architecture, state machine,
+  data flow, feedback loop) and a `sequence` (parties exchanging messages in time order)
+  are laid out by the renderer and emitted as inline SVG that inherits the page palette, so
+  one drawing serves light, dark and print. The model supplies nodes, edges and labels; it
+  never supplies coordinates, sizes or colours. Each of those figures is also written beside
+  the course as `figures/<section>.excalidraw`, so a reader can open it at excalidraw.com,
+  move a box and keep the result.
 - Math is plain text: `W_Q` renders as a subscript base plus script, `K^T` as a
   superscript, `R^(n×d)` and `sqrt(d_k)` too, and only in a `math` block does it turn
   LaTeX it was told not to write into a stacked fraction and a radical rather than
   printing it. A multi-letter base (`web_search`) is left alone: it is an identifier.
 - Print drops the rail, the depth bar, the buttons and the video posters, turns dark cards
-  into outlined boxes, labels each level, and appends the URL after every link.
+  into outlined boxes, labels each level, and appends the URL after every link. The SVG
+  figures re-colour for paper (white boxes, black type) and print as line art; the canvas
+  charts are screen-only and do not print.
 - Videos and reading are tagged with a depth and the page shows the ones for the depth you
   are reading; items that carry no depth are always shown, and when nothing matches the
   current depth the whole list is shown rather than an empty shelf.

@@ -46,13 +46,25 @@ BLOCK_MENU = """Available block kinds (use several different ones; never invent 
 - {"kind":"figure","caption":"what it shows","spec":{FIGURES}}"""
 
 FIGURE_MENU = """{"type":"flow","steps":["token id","embedding","attention head","feed-forward","logits"]}
-       Best for any process, pipeline, architecture or causal chain: 3-6 short steps, two or
-       three words each. No data needed. A step label may carry a symbol: W_Q multiplies, or
-       write W_{Q} for a multi-character subscript.
+       Best for any process, pipeline or causal chain: 3-6 short steps, two or three words
+       each. No data needed. A step label may carry a symbol: W_Q multiplies, or write W_{Q}
+       for a multi-character subscript.
+       or {"type":"diagram","nodes":[{"id":"a","label":"prompt"},{"id":"b","label":"tokens"},{"id":"c","label":"logits","group":"focus"}],"edges":[{"from":"a","to":"b","label":"encode"},{"from":"b","to":"c","label":"predict"}]}
+       Best when one thing points at another and the arrows carry meaning: architecture, data
+       flow, a state machine, a dependency graph, a feedback loop. 2-8 nodes; ids are short
+       words (a, b, fetch); labels two or three words; edge labels short and only where the
+       arrow needs one. "group":"focus" marks the single node this section is about. Put a
+       cycle in when the subject has one — it is drawn, not refused.
+       or {"type":"sequence","actors":["user","gateway","model"],"messages":[{"from":"user","to":"gateway","label":"prompt"},{"from":"gateway","to":"model","label":"messages"},{"from":"model","to":"gateway","label":"tokens","reply":true}]}
+       Best for anything that happens in time order between named parties: a protocol, a
+       request and its answer, a handshake. 2-5 actors, up to 8 messages, read top to bottom;
+       "reply":true marks the return leg of a call.
        or {"type":"bars","points":[{"label":"2019","value":12},{"label":"2024","value":31}],"xlabel":"year","ylabel":"count"}
        or {"type":"line","points":[{"label":"0","value":1},{"label":"1","value":4}]}
        A course should carry at least one figure when the subject has a natural structure or
-       process. Data charts only for numbers you genuinely have — never invent data."""
+       process. Prefer a diagram or a sequence over a flow when the thing you are showing has
+       parts that connect rather than steps that follow. Data charts only for numbers you
+       genuinely have — never invent data."""
 
 LEVEL_RULES = """LEVEL RULES — this is the whole point of the course. The three versions must NOT be
 the same text at different lengths, and none of them is a summary. Each level is a complete
@@ -414,10 +426,17 @@ REQUIRED STRUCTURE FOR THIS SECTION:
   The figure is SHARED by all three depths, so put it here and not inside a level's blocks —
   a novice must be able to see it too.
   Choose the figure this section actually needs:
-  * a process, pipeline, architecture or causal chain -> {"type":"flow","steps":["step","step","step"]}
+  * a process, pipeline or causal chain -> {"type":"flow","steps":["step","step","step"]}
+  * parts that connect, with meaning on the arrows (architecture, state machine, data flow,
+    feedback loop) -> {"type":"diagram","nodes":[...],"edges":[...]}
+  * parties exchanging things in time order (protocol, request/response) ->
+    {"type":"sequence","actors":[...],"messages":[...]}
   * real numbers you are sure of -> {"type":"bars","points":[{"label":"x","value":1},...]}
   * a conceptual distinction with no process and no numbers -> a flow of 3-5 concept labels
     (a flow of ideas is a valid figure; never invent data to fill space)
+  A diagram or a sequence is a better figure than a flow whenever the subject has parts that
+  relate, or an exchange that happens in time. The renderer places every element; never give
+  coordinates, sizes or colours.
 
 <<LEVEL_RULES>>
 

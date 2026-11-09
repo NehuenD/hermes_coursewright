@@ -53,7 +53,7 @@ def _safe_url(value: Any, limit: int = 800) -> str:
     return url if re.match(r"^https?://", url, re.I) else ""
 
 
-_FIGURE_TYPES = {"flow", "bars", "line", "trajectory"}
+_FIGURE_TYPES = {"flow", "bars", "line", "trajectory", "diagram", "sequence"}
 
 
 def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[str, Any]:
@@ -73,11 +73,66 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
         if len(steps) < 2:
             warnings.append(f"{where}: dropped flow figure with fewer than two steps")
             return {}
-        return {"type": "flow", "steps": steps}
+        return {"type": "flow", "steps": steps, "caption": _s(spec.get("caption"), 300)}
     if kind == "trajectory":
         n = spec.get("n")
         n = n if isinstance(n, int) and not isinstance(n, bool) else 27
-        return {"type": "trajectory", "n": max(3, min(n, 97))}
+        return {"type": "trajectory", "n": max(3, min(n, 97)),
+                "caption": _s(spec.get("caption"), 300)}
+    if kind == "diagram":
+        nodes: List[Dict[str, str]] = []
+        seen: set = set()
+        for raw_node in _list(spec.get("nodes"))[:8]:
+            if not isinstance(raw_node, dict):
+                continue
+            label = _s(raw_node.get("label"), 26).strip()
+            if not label:
+                continue
+            nid = re.sub(r"[^A-Za-z0-9_-]", "", _s(raw_node.get("id"), 20).strip())[:20]
+            if not nid or nid in seen:
+                nid = f"n{len(nodes) + 1}"
+            seen.add(nid)
+            nodes.append({"id": nid, "label": label, "group": _s(raw_node.get("group"), 12).strip()})
+        if len(nodes) < 2:
+            warnings.append(f"{where}: dropped diagram with fewer than two labelled nodes")
+            return {}
+        known = {node["id"] for node in nodes}
+        edges: List[Dict[str, str]] = []
+        for raw_edge in _list(spec.get("edges"))[:12]:
+            if not isinstance(raw_edge, dict):
+                continue
+            src = _s(raw_edge.get("from"), 20).strip()
+            dst = _s(raw_edge.get("to"), 20).strip()
+            if src not in known or dst not in known:
+                continue      # a dangling edge is one typo, not a reason to lose the figure
+            edges.append({"from": src, "to": dst, "label": _s(raw_edge.get("label"), 26).strip()})
+        return {"type": "diagram", "nodes": nodes, "edges": edges,
+                "caption": _s(spec.get("caption"), 300)}
+    if kind == "sequence":
+        actors: List[str] = []
+        for raw_actor in _list(spec.get("actors"))[:5]:
+            name = _s(raw_actor, 22).strip()
+            if name and name not in actors:
+                actors.append(name)
+        if len(actors) < 2:
+            warnings.append(f"{where}: dropped sequence figure with fewer than two actors")
+            return {}
+        messages: List[Dict[str, Any]] = []
+        for raw_message in _list(spec.get("messages"))[:8]:
+            if not isinstance(raw_message, dict):
+                continue
+            src = _s(raw_message.get("from"), 22).strip()
+            dst = _s(raw_message.get("to"), 22).strip()
+            if src not in actors or dst not in actors:
+                continue
+            messages.append({"from": src, "to": dst,
+                             "label": _s(raw_message.get("label"), 32).strip(),
+                             "reply": bool(raw_message.get("reply"))})
+        if not messages:
+            warnings.append(f"{where}: dropped sequence figure with no message between its actors")
+            return {}
+        return {"type": "sequence", "actors": actors, "messages": messages,
+                "caption": _s(spec.get("caption"), 300)}
     points = []
     for raw in _list(spec.get("points"))[:24]:
         if not isinstance(raw, dict):
@@ -89,7 +144,7 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
     if len(points) < 2:
         warnings.append(f"{where}: dropped {kind} figure with fewer than two numeric points")
         return {}
-    return {"type": kind, "points": points,
+    return {"type": kind, "points": points, "caption": _s(spec.get("caption"), 300),
             "xlabel": _s(spec.get("xlabel"), 28), "ylabel": _s(spec.get("ylabel"), 28)}
 
 
@@ -261,6 +316,7 @@ def validate(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
             if not levels[level]["blocks"]:
                 warnings.append(f"{where}: level {level} empty, filled from {filled[0]}")
                 levels[level] = {"blocks": list(levels[filled[0]]["blocks"])}
+        raw_visual = raw_section.get("visual")
         section = {
             "id": sid,
             "title": _s(raw_section.get("title"), 300) or f"Section {index + 1}",
@@ -268,7 +324,10 @@ def validate(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
             "eyebrow": _s(raw_section.get("eyebrow"), 80),
             "levels": levels,
             "exercise": _exercise(raw_section.get("exercise"), where, warnings),
-            "visual": raw_section.get("visual") if isinstance(raw_section.get("visual"), dict) else None,
+            # the shared figure slot goes through the same coercion as a figure block: it
+            # used to reach the renderer raw, so a malformed one drew nothing and said nothing
+            "visual": (_figure_spec(raw_visual if isinstance(raw_visual, dict) else {},
+                                    f"{where} figure", warnings) or None),
         }
         sections.append(section)
 

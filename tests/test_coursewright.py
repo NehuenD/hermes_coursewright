@@ -164,7 +164,8 @@ class TestValidationNeverRaises(unittest.TestCase):
         clean, warnings = spec.validate(raw)
         page = render.render(clean)                   # must not raise
         self.assertIn("flow", page)
-        self.assertEqual(len(clean["sections"][0]["visual"]), 2)   # steps: 3 -> dropped
+        self.assertIsNone(clean["sections"][0]["visual"])           # steps: 3 -> dropped, not kept raw
+        self.assertTrue(any("figure" in w and "flow" in w for w in warnings))
         figure_block = clean["sections"][0]["levels"]["novice"]["blocks"][0]
         self.assertEqual(figure_block["kind"], "figure")
         self.assertEqual(figure_block["spec"]["type"], "flow")
@@ -334,6 +335,34 @@ class TestBuild(StoreCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["sources"], 2)
         self.assertEqual(result["readers"], ["web_extract"])
+
+    def test_a_diagram_figure_writes_an_editable_side_file(self):
+        """The page gets SVG; the reader gets a scene they can move boxes around in."""
+        spec_path = self.root / "diagram.json"
+        spec_path.write_text(json.dumps({
+            "slug": "diagram-course", "title": "Diagram", "language": "en",
+            "default_level": "intermediate", "identity": {}, "outcomes": [],
+            "provenance": {"researched": False, "finders": [], "readers": [], "sources": [],
+                           "failures": [], "warnings": [], "generated": ""},
+            "resources": {"videos": [], "reading": []},
+            "sections": [{
+                "id": "s1", "title": "S",
+                "visual": {"type": "sequence", "actors": ["user", "model"],
+                           "messages": [{"from": "user", "to": "model", "label": "prompt"}],
+                           "caption": "the exchange"},
+                "levels": {lvl: {"blocks": [{"kind": "prose", "md": "x"}]}
+                           for lvl in ("novice", "intermediate", "advanced")}}],
+        }))
+        ctx = FakeCtx(config={"courses_dir": str(self.root / "mirror")})
+        result = cw.build_course(ctx, {"spec_path": str(spec_path)})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["diagrams"], 1)
+        stored = self.root / "courses" / result["slug"] / "figures" / "s1.excalidraw"
+        scene = json.loads(stored.read_text())
+        self.assertEqual(scene["type"], "excalidraw")
+        self.assertTrue([e for e in scene["elements"] if e["type"] == "arrow"])
+        mirrored = self.root / "mirror" / result["slug"] / "figures" / "s1.excalidraw"
+        self.assertEqual(mirrored.read_text(), stored.read_text())
 
     def test_videos_survive_research_off(self):
         """enable_videos on its own must still collect a watch list.
@@ -818,6 +847,119 @@ class TestUnsourcedPage(unittest.TestCase):
         page = self._page(sources=("https://example.org/a", "https://example.org/b"))
         self.assertIn('href="#src-1"', page)      # [1] in prose
         self.assertNotIn('href="#src-9"', page)   # [9] has nothing behind it
+
+
+class TestSvgFigures(unittest.TestCase):
+    """A diagram is drawn by the page, not pasted onto it: SVG, themed, deterministic."""
+
+    DIAGRAM = {"type": "diagram",
+               "nodes": [{"id": "a", "label": "prompt"},
+                         {"id": "b", "label": "tokens", "group": "focus"},
+                         {"id": "c", "label": "logits"}],
+               "edges": [{"from": "a", "to": "b", "label": "encode"},
+                         {"from": "b", "to": "c"}]}
+    SEQUENCE = {"type": "sequence", "actors": ["user", "gateway", "model"],
+                "messages": [{"from": "user", "to": "gateway", "label": "prompt"},
+                             {"from": "gateway", "to": "model", "label": "messages"},
+                             {"from": "model", "to": "gateway", "label": "tokens", "reply": True}]}
+
+    def _figure(self, raw, where="s1"):
+        notes: list = []
+        return spec._figure_spec(raw, where, notes), notes
+
+    def _render(self, raw):
+        clean, _ = self._figure(raw)
+        return render._figure(clean)
+
+    def test_a_diagram_draws_inline_svg(self):
+        svg = self._render(dict(self.DIAGRAM))
+        self.assertIn('<svg class="fig-svg"', svg)
+        self.assertIn("prompt", svg)
+        self.assertEqual(svg.count('<rect class="nd'), 3)
+        self.assertIn('class="nd on"', svg)                  # the focus node is marked
+
+    def test_the_svg_carries_no_colour_of_its_own(self):
+        """Theme comes from the page: a baked fill would be a light-mode slab in dark mode."""
+        for raw in (self.DIAGRAM, self.SEQUENCE):
+            svg = self._render(dict(raw))
+            self.assertNotIn('fill="#', svg)
+            self.assertNotIn('stroke="#', svg)
+            self.assertNotIn("currentColor", svg)            # even currentColor would leave print
+
+    def test_both_kinds_parse_as_xml(self):
+        from xml.etree import ElementTree
+        for raw in (self.DIAGRAM, self.SEQUENCE):
+            ElementTree.fromstring(self._render(dict(raw)))
+
+    def test_a_label_cannot_close_a_tag(self):
+        raw = {"type": "diagram",
+               "nodes": [{"id": "a", "label": "<script>x"},
+                         {"id": "b", "label": "b & c"}],
+               "edges": [{"from": "a", "to": "b"}]}
+        svg = self._render(raw)
+        self.assertIn("&lt;script&gt;x", svg)
+        self.assertIn("b &amp; c", svg)
+        self.assertNotIn("<script>", svg)
+
+    def test_the_same_spec_draws_the_same_picture(self):
+        self.assertEqual(self._render(dict(self.DIAGRAM)), self._render(dict(self.DIAGRAM)))
+
+    def test_a_cycle_is_drawn_not_refused(self):
+        raw = {"type": "diagram",
+               "nodes": [{"id": "a", "label": "ready"}, {"id": "b", "label": "waiting"}],
+               "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "a", "label": "timeout"}]}
+        svg = self._render(raw)
+        from xml.etree import ElementTree
+        ElementTree.fromstring(svg)
+        self.assertEqual(svg.count('class="ed"'), 2)
+        self.assertIn("timeout", svg)
+
+    def test_a_sequence_marks_the_reply_dashed(self):
+        svg = self._render(dict(self.SEQUENCE))
+        self.assertIn('class="ed reply"', svg)
+        self.assertEqual(svg.count('class="ll"'), 3)         # one lifeline per actor
+
+    def test_a_dangling_edge_is_dropped_but_the_figure_survives(self):
+        raw = {"type": "diagram",
+               "nodes": [{"id": "a", "label": "one"}, {"id": "b", "label": "two"}],
+               "edges": [{"from": "a", "to": "b"}, {"from": "a", "to": "ghost"}]}
+        clean, _ = self._figure(raw)
+        self.assertEqual(len(clean["edges"]), 1)
+
+    def test_a_message_to_an_unknown_actor_is_dropped(self):
+        raw = dict(self.SEQUENCE)
+        raw["messages"] = list(raw["messages"]) + [{"from": "user", "to": "database", "label": "sql"}]
+        clean, _ = self._figure(raw)
+        self.assertTrue(all(m["to"] in clean["actors"] for m in clean["messages"]))
+
+    def test_a_figure_the_page_cannot_draw_is_refused_with_a_reason(self):
+        clean, notes = self._figure({"type": "diagram", "nodes": {"a": "one"}})
+        self.assertEqual(clean, {})
+        self.assertTrue(notes and "two labelled nodes" in notes[0])
+
+    def test_the_shared_visual_is_validated_too(self):
+        """It used to reach the renderer raw: malformed meant nothing drawn and nothing said."""
+        raw = {"slug": "p", "title": "T", "sections": [{
+            "id": "s1", "title": "S",
+            "visual": {"type": "flow", "steps": 3},
+            "levels": {lvl: {"blocks": [{"kind": "prose", "md": "x"}]}
+                       for lvl in ("novice", "intermediate", "advanced")}}]}
+        clean, notes = spec.validate(raw)
+        self.assertIsNone(clean["sections"][0]["visual"])
+        self.assertTrue([n for n in notes if "figure" in n])
+
+    def test_the_side_scene_agrees_with_the_drawing(self):
+        clean, _ = self._figure(dict(self.DIAGRAM))
+        scene = render.scene_from_figure(clean, "caption")
+        rects = [e for e in scene["elements"] if e["type"] == "rectangle"]
+        arrows = [e for e in scene["elements"] if e["type"] == "arrow"]
+        self.assertEqual(len(rects), 3)
+        self.assertEqual(len(arrows), 2)
+        labels = [e["text"] for e in scene["elements"] if e["type"] == "text"]
+        self.assertIn("prompt", labels)
+        # same placement as the SVG: the boxes start at the same coordinates
+        self.assertEqual(rects[0]["x"], 14.0)
+        self.assertEqual(scene, render.scene_from_figure(clean, "caption"))
 
 
 class TestDevImportPath(unittest.TestCase):

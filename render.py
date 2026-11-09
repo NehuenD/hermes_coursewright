@@ -568,8 +568,396 @@ def _block(block: Dict[str, Any]) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------
+# figures drawn as inline SVG: a layered diagram and a sequence diagram
+# --------------------------------------------------------------------------
+# A figure has to belong to the page, not sit on it. These are SVG, not images: they inherit
+# --ink, --surface and --line, so they follow the reader's light/dark setting, and they
+# survive print, where the canvas plots do not (the print stylesheet hides canvas).
+#
+# Layout is computed here, never asked of the model: placement is the part models get wrong,
+# and a deterministic layout means the same spec always draws the same picture.
+_FIG_TEXT = 12.5            # node label size, px
+_FIG_EDGE_TEXT = 10.5       # edge label size, px
+_FIG_BOX_H = 42
+_FIG_ROW_GAP = 26
+_FIG_COL_GAP = 74
+
+
+def _svg_text(value: Any) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def _node_width(label: str) -> float:
+    """Rough but stable: mono-ish glyphs at 12.5px, clamped so one long label cannot stretch
+    a whole column and a two-letter one does not become a dot."""
+    return max(72.0, min(168.0, 7.1 * len(label) + 24.0))
+
+
+def _layered(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Assign a layer to every node, breaking cycles at the edge that closes them.
+
+    A cycle is legal in a state machine, so this cannot refuse one: depth-first, mark the
+    edge that returns into the current stack as a back edge, then relax layers over what is
+    left. Back edges are drawn underneath the figure instead of crossing it.
+    """
+    ids = [n["id"] for n in nodes]
+    out: Dict[str, List[str]] = {i: [] for i in ids}
+    back = set()
+    for edge in edges:
+        out[edge["from"]].append(edge["to"])
+    state: Dict[str, int] = {}
+    order: List[str] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        for nxt in out[node]:
+            if state.get(nxt) == 1:
+                back.add((node, nxt))
+                continue
+            if nxt not in state:
+                visit(nxt)
+        state[node] = 2
+        order.append(node)
+
+    for node in ids:
+        if node not in state:
+            visit(node)
+
+    layer = {node: 0 for node in ids}
+    for node in reversed(order):                     # a topological order of the acyclic part
+        for nxt in out[node]:
+            if (node, nxt) in back:
+                continue
+            layer[nxt] = max(layer[nxt], layer[node] + 1)
+    return layer
+
+
+def _arrow(x: float, y: float, dx: int, dy: int) -> str:
+    """A filled head drawn as a polygon: no <defs> id to collide with the next figure."""
+    back_x, back_y = x - 7 * dx, y - 7 * dy
+    return (f'<polygon class="ah" points="{x},{y} {back_x + 4 * dy},{back_y + 4 * dx} '
+            f'{back_x - 4 * dy},{back_y - 4 * dx}"/>')
+
+
+def _edge_label(x: float, y: float, text: str, size: float = 0.0) -> str:
+    if not text:
+        return ""
+    width = 6.2 * len(text) + 8
+    style = f' style="font-size:{size:.1f}px"' if size else ""
+    return (f'<rect class="elabel-bg" x="{x - width / 2:.1f}" y="{y - 12:.1f}" '
+            f'width="{width:.1f}" height="14" rx="3"/>'
+            f'<text class="elabel" x="{x:.1f}" y="{y - 1:.1f}" text-anchor="middle"{style}>'
+            f'{_svg_text(text)}</text>')
+
+
+def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """One placement, used by the SVG and by the .excalidraw side file.
+
+    Two renderers sharing a layout is the point: the drawing and the editable scene have to
+    agree about where a box is, or editing the side file produces a different figure.
+    """
+    layer = _layered(nodes, edges)
+    by_layer: Dict[int, List[Dict[str, Any]]] = {}
+    for node in nodes:                       # input order inside a layer: the model's own
+        by_layer.setdefault(layer[node["id"]], []).append(node)
+    widest = {L: max(_node_width(n["label"]) for n in group) for L, group in by_layer.items()}
+
+    pad = 14.0
+    xs: Dict[int, float] = {}
+    x = pad
+    for L in sorted(by_layer):
+        xs[L] = x
+        x += widest[L] + _FIG_COL_GAP
+    columns_h = {L: len(g) * (_FIG_BOX_H + _FIG_ROW_GAP) - _FIG_ROW_GAP for L, g in by_layer.items()}
+    tallest = max(columns_h.values())
+    top = pad
+    y_of: Dict[str, float] = {}
+    for L, group in by_layer.items():
+        start = top + (tallest - columns_h[L]) / 2
+        for k, node in enumerate(group):
+            y_of[node["id"]] = start + k * (_FIG_BOX_H + _FIG_ROW_GAP)
+    return {"layer": layer, "widest": widest, "xs": xs, "y_of": y_of, "top": top,
+            "tallest": tallest, "pad": pad, "width": x - _FIG_COL_GAP + pad}
+
+
+def _diagram_svg(spec: Dict[str, Any]) -> str:
+    nodes = [n for n in (spec.get("nodes") or []) if isinstance(n, dict) and n.get("id")]
+    edges = [e for e in (spec.get("edges") or []) if isinstance(e, dict)]
+    if len(nodes) < 2:
+        return ""
+    geo = _diagram_geometry(nodes, edges)
+    layer, widest = geo["layer"], geo["widest"]
+    xs, y_of, top, tallest, pad = geo["xs"], geo["y_of"], geo["top"], geo["tallest"], geo["pad"]
+    width = geo["width"]
+    # the figure is drawn at the page's width, so a wide graph is scaled DOWN on screen and its
+    # 12.5px labels would arrive at 8px. Grow the type with the drawing: the reader's width is
+    # fixed, the viewBox is not.
+    scale = max(1.0, min(1.8, width / 540.0))
+    node_style = f' style="font-size:{_FIG_TEXT * scale:.1f}px"' if scale > 1.02 else ""
+    edge_size = _FIG_EDGE_TEXT * scale if scale > 1.02 else 0.0
+
+    routed: List[str] = []
+    labels: List[str] = []
+    channel_n = 0
+    deepest = top + tallest
+    for j, edge in enumerate(edges):
+        src, dst = edge["from"], edge["to"]
+        if src not in y_of or dst not in y_of:
+            continue
+        text = str(edge.get("label") or "")
+        if src == dst:                                     # a state that stays put
+            x1 = xs[layer[src]] + widest[layer[src]]
+            y1 = y_of[src] + _FIG_BOX_H * 0.35
+            routed.append(f'<path class="ed" d="M {x1:.1f},{y1:.1f} h 26 v 16 h -26"/>')
+            labels.append(_edge_label(x1 + 13, y1 + 30, text, edge_size))
+            continue
+        ls, lt = layer[src], layer[dst]
+        if lt > ls:                                        # forward: exit right, enter left
+            x1 = xs[ls] + widest[ls]
+            y1 = y_of[src] + _FIG_BOX_H / 2
+            x2 = xs[lt]
+            y2 = y_of[dst] + _FIG_BOX_H / 2
+            cx = x1 + 24 + (j % 3) * 12
+            stop = x2 - 7
+            routed.append(f'<path class="ed" d="M {x1:.1f},{y1:.1f} H {cx:.1f} V {y2:.1f} H {stop:.1f}"/>')
+            routed.append(_arrow(x2, y2, 1, 0))
+            labels.append(_edge_label(cx, (y1 + y2) / 2, text, edge_size))
+            continue
+        # same layer or backward: run under the figure, in its own channel per edge
+        bx = xs[ls] + widest[ls] / 2
+        by = y_of[src] + _FIG_BOX_H
+        tx = xs[lt] + widest[lt] / 2
+        ty = y_of[dst] + _FIG_BOX_H
+        yb = top + tallest + 20 + (channel_n % 4) * 12
+        channel_n += 1
+        deepest = max(deepest, yb)
+        routed.append(f'<path class="ed" d="M {bx:.1f},{by:.1f} V {yb:.1f} H {tx:.1f} V {ty + 7:.1f}"/>')
+        routed.append(_arrow(tx, ty, 0, -1))
+        labels.append(_edge_label((bx + tx) / 2, yb + 2, text, edge_size))
+
+    boxes = []
+    for node in nodes:
+        nid = node["id"]
+        L = layer[nid]
+        cls = "nd on" if str(node.get("group") or "").strip() else "nd"
+        boxes.append(
+            f'<g><rect class="{cls}" x="{xs[L]:.1f}" y="{y_of[nid]:.1f}" '
+            f'width="{widest[L]:.1f}" height="{_FIG_BOX_H}"/>'
+            f'<text x="{xs[L] + widest[L] / 2:.1f}" y="{y_of[nid] + _FIG_BOX_H / 2 + 4.4:.1f}" '
+            f'text-anchor="middle"{node_style}>{_svg_text(node["label"])}'
+            f'<title>{_svg_text(node["label"])}</title></text></g>')
+
+    height = deepest + pad + 6
+    spoken = "; ".join(
+        f'{_spoken_label(next((n["label"] for n in nodes if n["id"] == e["from"]), ""))} to '
+        f'{_spoken_label(next((n["label"] for n in nodes if n["id"] == e["to"]), ""))}'
+        for e in edges[:6]) or ", ".join(_spoken_label(n["label"]) for n in nodes)
+    return (f'<svg class="fig-svg" viewBox="0 0 {width:.0f} {height:.0f}" '
+            f'role="img" aria-label="{html.escape("Diagram: " + spoken, quote=True)}">'
+            f'{"".join(boxes)}{"".join(routed)}{"".join(labels)}</svg>')
+
+
+def _sequence_svg(spec: Dict[str, Any]) -> str:
+    actors = [str(a) for a in (spec.get("actors") or []) if str(a).strip()]
+    messages = [m for m in (spec.get("messages") or []) if isinstance(m, dict)]
+    if len(actors) < 2 or not messages:
+        return ""
+    col = 150.0
+    pad = 16.0
+    head_h = 32.0
+    x_of = {actor: pad + i * col for i, actor in enumerate(actors)}
+    width = pad * 2 + (len(actors) - 1) * col + 120
+    scale = max(1.0, min(1.8, width / 540.0))    # same reason as the diagram: keep type readable
+    node_style = f' style="font-size:{_FIG_TEXT * scale:.1f}px"' if scale > 1.02 else ""
+    edge_size = _FIG_EDGE_TEXT * scale if scale > 1.02 else 0.0
+    top = pad
+    first_msg = top + head_h + 34
+    step = 42.0
+    bottom = first_msg + (len(messages) - 1) * step + 26
+
+    parts = []
+    for actor in actors:
+        x = x_of[actor]
+        parts.append(f'<rect class="nd" x="{x:.1f}" y="{top:.1f}" width="120" height="{head_h}"/>'
+                     f'<text x="{x + 60:.1f}" y="{top + head_h / 2 + 4.4:.1f}" text-anchor="middle"{node_style}>'
+                     f'{_svg_text(actor)}</text>')
+        parts.append(f'<line class="ll" x1="{x + 60:.1f}" y1="{top + head_h:.1f}" '
+                     f'x2="{x + 60:.1f}" y2="{bottom:.1f}"/>')
+
+    spoken = []
+    for i, message in enumerate(messages):
+        src, dst = str(message.get("from") or ""), str(message.get("to") or "")
+        if src not in x_of or dst not in x_of:
+            continue
+        y = first_msg + i * step
+        text = str(message.get("label") or "")
+        lane = "ed reply" if message.get("reply") else "ed"
+        if src == dst:                                  # a call that returns to itself
+            x = x_of[src] + 60
+            parts.append(f'<path class="{lane}" d="M {x:.1f},{y - 8:.1f} h 34 v 20 h -34"/>')
+            parts.append(_arrow(x + 7, y + 12, -1, 0))
+            parts.append(_edge_label(x + 44, y - 6, text, edge_size) if text else "")
+        else:
+            x1 = x_of[src] + 60
+            x2 = x_of[dst] + 60
+            direction = 1 if x2 > x1 else -1
+            parts.append(f'<path class="{lane}" d="M {x1:.1f},{y:.1f} H {x2 - 8 * direction:.1f}"/>')
+            parts.append(_arrow(x2, y, direction, 0))
+            parts.append(_edge_label((x1 + x2) / 2, y - 7, text, edge_size) if text else "")
+        spoken.append(f'{_spoken_label(src)} to {_spoken_label(dst)}: {_spoken_label(text)}')
+
+    return (f'<svg class="fig-svg" viewBox="0 0 {width:.0f} {bottom + pad:.0f}" '
+            f'role="img" aria-label="{html.escape("Sequence: " + "; ".join(spoken[:8]), quote=True)}">'
+            f'{"".join(parts)}</svg>')
+
+
+def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]:
+    """The same figure as an editable .excalidraw scene, so a reader can open it and move things.
+
+    Written beside the course, never used by the page: the page draws SVG, this is the
+    hand-off to excalidraw.com. Element ids, seeds and versions are fixed values, so
+    re-exporting an unchanged course produces a byte-identical file.
+    """
+    kind = str(spec.get("type") or "").strip().lower()
+    elements: List[Dict[str, Any]] = []
+    font = 3                                    # Cascadia: closest to the page's mono labels
+    ink = "#1e1e1e"
+
+    def text_el(eid: str, body: str, x: float, y: float, w: float, h: float, size: int,
+                container: str = "") -> Dict[str, Any]:
+        item = {"type": "text", "id": eid, "x": x, "y": y, "width": w, "height": h,
+                "angle": 0, "strokeColor": ink, "backgroundColor": "transparent",
+                "fillStyle": "solid", "strokeWidth": 1, "roughness": 1, "opacity": 100,
+                "groupIds": [], "frameId": None, "roundness": None,
+                "seed": len(elements) * 7 + 11, "version": 1, "versionNonce": 1,
+                "isDeleted": False, "boundElements": [],
+                "text": body, "originalText": body, "fontSize": size, "fontFamily": font,
+                "textAlign": "center", "verticalAlign": "middle", "lineHeight": 1.25,
+                "containerId": container or None, "autoResize": True}
+        return item
+
+    if kind == "diagram":
+        nodes = [n for n in (spec.get("nodes") or []) if isinstance(n, dict) and n.get("id")]
+        edges = [e for e in (spec.get("edges") or []) if isinstance(e, dict)]
+        if len(nodes) < 2:
+            return {}
+        geo = _diagram_geometry(nodes, edges)
+        layer, widest, xs, y_of = geo["layer"], geo["widest"], geo["xs"], geo["y_of"]
+        for node in nodes:
+            nid, L = node["id"], layer[node["id"]]
+            rid, tid = f"fig-{nid}", f"fig-{nid}-label"
+            x, y, w = xs[L], y_of[nid], widest[L]
+            elements.append({
+                "type": "rectangle", "id": rid, "x": x, "y": y, "width": w, "height": _FIG_BOX_H,
+                "angle": 0, "strokeColor": "#1e1e1e",
+                "backgroundColor": "#e7f5ff" if node.get("group") else "#f8f9fa",
+                "fillStyle": "solid", "strokeWidth": 2, "roughness": 1, "opacity": 100,
+                "groupIds": [], "frameId": None, "roundness": {"type": 3},
+                "seed": len(elements) * 7 + 3, "version": 1, "versionNonce": 1,
+                "isDeleted": False, "boundElements": [{"type": "text", "id": tid}]})
+            elements.append(text_el(tid, node["label"], x + 2, y + _FIG_BOX_H / 2 - 9,
+                                    max(10.0, w - 4), 18, 13, container=rid))
+        for j, edge in enumerate(edges):
+            src, dst = edge["from"], edge["to"]
+            if src not in y_of or dst not in y_of:
+                continue
+            ls, lt = layer[src], layer[dst]
+            if src == dst:
+                x1 = xs[ls] + widest[ls]
+                y1 = y_of[src] + _FIG_BOX_H * 0.35
+                points = [[0, 0], [26, 0], [26, 16], [0, 16]]
+            elif lt > ls:
+                x1 = xs[ls] + widest[ls]
+                y1 = y_of[src] + _FIG_BOX_H / 2
+                cx = x1 + 24 + (j % 3) * 12
+                y2 = y_of[dst] + _FIG_BOX_H / 2
+                points = [[0, 0], [cx - x1, 0], [cx - x1, y2 - y1],
+                          [xs[lt] - x1, y2 - y1]]
+            else:
+                x1 = xs[ls] + widest[ls] / 2
+                y1 = y_of[src] + _FIG_BOX_H
+                yb = max(y_of.values()) + _FIG_BOX_H + 20 + 12 * j
+                points = [[0, 0], [0, yb - y1], [xs[lt] + widest[lt] / 2 - x1, yb - y1],
+                          [xs[lt] + widest[lt] / 2 - x1, y_of[dst] + _FIG_BOX_H - y1]]
+            elements.append({
+                "type": "arrow", "id": f"fig-edge-{j}", "x": x1, "y": y1,
+                "width": abs(points[-1][0]), "height": abs(points[-1][1]),
+                "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent",
+                "fillStyle": "solid", "strokeWidth": 1.5, "roughness": 1, "opacity": 100,
+                "groupIds": [], "frameId": None, "roundness": {"type": 2},
+                "seed": len(elements) * 7 + 5, "version": 1, "versionNonce": 1,
+                "isDeleted": False, "boundElements": [], "points": points,
+                "lastCommittedPoint": None, "startBinding": None, "endBinding": None,
+                "startArrowhead": None, "endArrowhead": "arrow", "elbowed": False})
+            if edge.get("label"):
+                lx = x1 + points[-1][0] / 2
+                ly = y1 + points[-1][1] / 2 - 9
+                elements.append(text_el(f"fig-edge-{j}-label", str(edge["label"]), lx, ly,
+                                        max(20.0, 6.4 * len(str(edge["label"]))), 16, 11))
+    elif kind == "sequence":
+        actors = [str(a) for a in (spec.get("actors") or []) if str(a).strip()]
+        messages = [m for m in (spec.get("messages") or []) if isinstance(m, dict)]
+        if len(actors) < 2 or not messages:
+            return {}
+        col, pad, head = 150.0, 16.0, 32.0
+        x_of = {actor: pad + i * col for i, actor in enumerate(actors)}
+        bottom = pad + head + 34 + max(0, len(messages) - 1) * 42 + 26
+        for actor in actors:
+            x = x_of[actor]
+            rid, tid = f"fig-{actor}", f"fig-{actor}-label"
+            elements.append({
+                "type": "rectangle", "id": rid, "x": x, "y": pad, "width": 120, "height": head,
+                "angle": 0, "strokeColor": ink, "backgroundColor": "#f8f9fa", "fillStyle": "solid",
+                "strokeWidth": 2, "roughness": 1, "opacity": 100, "groupIds": [], "frameId": None,
+                "roundness": {"type": 3}, "seed": len(elements) * 7 + 3, "version": 1,
+                "versionNonce": 1, "isDeleted": False,
+                "boundElements": [{"type": "text", "id": tid}]})
+            elements.append(text_el(tid, actor, x + 2, pad + head / 2 - 9, 116, 18, 13,
+                                    container=rid))
+            elements.append({
+                "type": "line", "id": f"fig-life-{actor}", "x": x + 60, "y": pad + head,
+                "width": 0, "height": bottom - pad - head, "angle": 0, "strokeColor": "#adb5bd",
+                "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1,
+                "roughness": 0, "opacity": 100, "groupIds": [], "frameId": None, "roundness": None,
+                "seed": len(elements) * 7 + 5, "version": 1, "versionNonce": 1, "isDeleted": False,
+                "boundElements": [], "points": [[0, 0], [0, bottom - pad - head]],
+                "lastCommittedPoint": None, "startBinding": None, "endBinding": None,
+                "startArrowhead": None, "endArrowhead": None})
+        for i, message in enumerate(messages):
+            y = pad + head + 34 + i * 42
+            src, dst = str(message.get("from") or ""), str(message.get("to") or "")
+            if src not in x_of or dst not in x_of or src == dst:
+                continue
+            x1, x2 = x_of[src] + 60, x_of[dst] + 60
+            elements.append({
+                "type": "arrow", "id": f"fig-msg-{i}", "x": x1, "y": y,
+                "width": abs(x2 - x1), "height": 0, "angle": 0,
+                "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid",
+                "strokeWidth": 1.5, "roughness": 1, "opacity": 100, "groupIds": [], "frameId": None,
+                "roundness": {"type": 2}, "seed": len(elements) * 7 + 5, "version": 1,
+                "versionNonce": 1, "isDeleted": False, "boundElements": [],
+                "points": [[0, 0], [x2 - x1, 0]], "lastCommittedPoint": None,
+                "startBinding": None, "endBinding": None, "startArrowhead": None,
+                "endArrowhead": "arrow", "elbowed": False,
+                "strokeStyle": "dashed" if message.get("reply") else "solid"})
+            if message.get("label"):
+                elements.append(text_el(f"fig-msg-{i}-label", str(message["label"]),
+                                        (x1 + x2) / 2 - 40, y - 20, 80, 16, 11))
+    else:
+        return {}
+    if caption:
+        elements.append(text_el("fig-caption", caption, 14.0, -34.0, 520.0, 20, 13))
+    return {"type": "excalidraw", "version": 2, "source": "coursewright",
+            "elements": elements, "appState": {"viewBackgroundColor": "#ffffff"}, "files": {}}
+
+
 def _figure(spec: Dict[str, Any]) -> str:
     kind = str(spec.get("type") or "").strip().lower()
+    if kind == "diagram":
+        return _diagram_svg(spec)
+    if kind == "sequence":
+        return _sequence_svg(spec)
     if kind == "flow":
         raw_steps = spec.get("steps")
         raw_steps = raw_steps if isinstance(raw_steps, list) else []
@@ -664,7 +1052,9 @@ def _section(section: Dict[str, Any], index: int) -> str:
     if section.get("visual"):
         visual = _figure(section["visual"])
         if visual:
-            visual = f'<figure class="fig fig-lead">{visual}</figure>'
+            caption = _inline(str(section["visual"].get("caption") or ""))
+            visual = ('<figure class="fig fig-lead">' + visual
+                      + (f"<figcaption>{caption}</figcaption>" if caption else "") + "</figure>")
     hook = f'<p class="hook">{_inline(section["hook"])}</p>' if section.get("hook") else ""
     eyebrow = (f'<span class="sec-eyebrow"><span class="sec-num">{index:02d}</span>'
                f'{" · " + _inline(section["eyebrow"]) if section.get("eyebrow") else ""}</span>')
@@ -1070,6 +1460,18 @@ pre code{background:none;border:0;padding:0;font-size:.85rem;line-height:1.6}
 
 /* figures */
 figure.fig{margin:2rem 0}
+/* an SVG figure belongs to the page: it inherits the palette, so light, dark and print all
+   work from one drawing instead of a baked image that only matches one theme */
+.fig-svg{width:100%;height:auto;display:block;overflow:visible;font-family:var(--mono)}
+.fig-svg text{fill:var(--ink);font-size:12.5px;font-family:var(--mono)}
+.fig-svg .nd{fill:var(--surface);stroke:var(--line);stroke-width:1.3}
+.fig-svg .nd.on{stroke:var(--accent);stroke-width:1.8}
+.fig-svg .ed{fill:none;stroke:var(--muted);stroke-width:1.3;stroke-linejoin:round}
+.fig-svg .reply{stroke-dasharray:4 4;opacity:.8}
+.fig-svg .ll{stroke:var(--line);stroke-width:1.1;stroke-dasharray:3 5}
+.fig-svg .ah{fill:var(--muted)}
+.fig-svg .elabel{fill:var(--muted);font-size:10.5px}
+.fig-svg .elabel-bg{fill:var(--bg)}
 
 /* ---- layouts: the identity's third axis has to change something real ---- */
 html[data-layout="column"] .rail,
@@ -1204,6 +1606,13 @@ ul.reading a{font-weight:500;text-decoration:none;border-bottom:1px solid color-
   .sec{page-break-inside:auto}
   .sec-head,.ex,figure.fig,.vcard,.checkpoint{page-break-inside:avoid}
   iframe,canvas{display:none!important}
+  /* an SVG figure is vector and prints: undo the screen palette for paper */
+  .fig-svg .nd{fill:#fff!important;stroke:#666!important}
+  .fig-svg .nd.on{stroke:#000!important}
+  .fig-svg text,.fig-svg .elabel{fill:#000!important}
+  .fig-svg .ed,.fig-svg .ll{stroke:#333!important}
+  .fig-svg .ah{fill:#333!important}
+  .fig-svg .elabel-bg{fill:#fff!important}
   .thesis{border-left:2px solid #666}
   .prov{border-top:1px solid #ccc;color:#333}
   .cite a{border-bottom:0;color:#000}
