@@ -948,6 +948,31 @@ class TestSvgFigures(unittest.TestCase):
         self.assertIsNone(clean["sections"][0]["visual"])
         self.assertTrue([n for n in notes if "figure" in n])
 
+    def test_an_edge_label_stays_inside_its_gap(self):
+        """A label wider than the column gap prints on top of the boxes either side of it."""
+        from xml.etree import ElementTree
+        raw = {"type": "diagram",
+               "nodes": [{"id": "a", "label": "residual stream"},
+                         {"id": "b", "label": "next logits"},
+                         {"id": "c", "label": "feed-forward"}],
+               "edges": [{"from": "a", "to": "b", "label": "second pass"},
+                         {"from": "b", "to": "c", "label": "and again"}]}
+        def num(element, key: str) -> float:
+            return float(str(element.get(key) or "0"))
+
+        tree = ElementTree.fromstring(self._render(raw))
+        boxes = [e for e in tree.iter() if e.get("class") == "nd"]
+        masks = [e for e in tree.iter() if e.get("class") == "elabel-bg"]
+        self.assertTrue(masks)
+        for mask in masks:
+            mx, mw = num(mask, "x"), num(mask, "width")
+            for box in boxes:
+                bx, bw = num(box, "x"), num(box, "width")
+                overlap = min(mx + mw, bx + bw) - max(mx, bx)
+                self.assertLessEqual(round(overlap, 1), 0.0,
+                                     f"edge label [{mx:.0f}..{mx + mw:.0f}] runs into a box "
+                                     f"[{bx:.0f}..{bx + bw:.0f}]")
+
     def test_the_side_scene_agrees_with_the_drawing(self):
         clean, _ = self._figure(dict(self.DIAGRAM))
         scene = render.scene_from_figure(clean, "caption")

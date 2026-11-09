@@ -643,7 +643,9 @@ def _arrow(x: float, y: float, dx: int, dy: int) -> str:
 def _edge_label(x: float, y: float, text: str, size: float = 0.0) -> str:
     if not text:
         return ""
-    width = 6.2 * len(text) + 8
+    # the mask behind the label has to be as wide as the text it covers, at whatever size
+    # that text is drawn
+    width = 0.62 * (size or _FIG_EDGE_TEXT) * len(text) + 10
     style = f' style="font-size:{size:.1f}px"' if size else ""
     return (f'<rect class="elabel-bg" x="{x - width / 2:.1f}" y="{y - 12:.1f}" '
             f'width="{width:.1f}" height="14" rx="3"/>'
@@ -664,11 +666,18 @@ def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) 
     widest = {L: max(_node_width(n["label"]) for n in group) for L, group in by_layer.items()}
 
     pad = 14.0
+    # The column gap has to hold the longest edge label, at the size it will actually be
+    # drawn. Type grows with the viewBox (see `scale` below), so reserve for the largest
+    # version: a label wider than its gap lands on the boxes on either side of it, which
+    # reads as a caption printed over a diagram.
+    label_w = max([0.62 * _FIG_EDGE_TEXT * 1.8 * len(str(edge.get("label") or ""))
+                   for edge in edges] or [0])
+    gap = max(_FIG_COL_GAP, min(230.0, label_w + 26))
     xs: Dict[int, float] = {}
     x = pad
     for L in sorted(by_layer):
         xs[L] = x
-        x += widest[L] + _FIG_COL_GAP
+        x += widest[L] + gap
     columns_h = {L: len(g) * (_FIG_BOX_H + _FIG_ROW_GAP) - _FIG_ROW_GAP for L, g in by_layer.items()}
     tallest = max(columns_h.values())
     top = pad
@@ -678,7 +687,7 @@ def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) 
         for k, node in enumerate(group):
             y_of[node["id"]] = start + k * (_FIG_BOX_H + _FIG_ROW_GAP)
     return {"layer": layer, "widest": widest, "xs": xs, "y_of": y_of, "top": top,
-            "tallest": tallest, "pad": pad, "width": x - _FIG_COL_GAP + pad}
+            "tallest": tallest, "pad": pad, "gap": gap, "width": x - gap + pad}
 
 
 def _diagram_svg(spec: Dict[str, Any]) -> str:
@@ -718,7 +727,7 @@ def _diagram_svg(spec: Dict[str, Any]) -> str:
             y1 = y_of[src] + _FIG_BOX_H / 2
             x2 = xs[lt]
             y2 = y_of[dst] + _FIG_BOX_H / 2
-            cx = x1 + 24 + (j % 3) * 12
+            cx = x1 + geo["gap"] / 2 + ((j % 3) - 1) * 6
             stop = x2 - 7
             routed.append(f'<path class="ed" d="M {x1:.1f},{y1:.1f} H {cx:.1f} V {y2:.1f} H {stop:.1f}"/>')
             routed.append(_arrow(x2, y2, 1, 0))
