@@ -579,9 +579,9 @@ def _block(block: Dict[str, Any]) -> str:
 # and a deterministic layout means the same spec always draws the same picture.
 _FIG_TEXT = 12.5            # node label size, px
 _FIG_EDGE_TEXT = 10.5       # edge label size, px
-_FIG_BOX_H = 42
-_FIG_ROW_GAP = 26
-_FIG_COL_GAP = 74
+_FIG_BOX_H = 38
+_FIG_ROW_GAP = 22           # between siblings inside one layer
+_FIG_LAYER_GAP = 62         # between layers, before an edge label widens it
 
 
 def _svg_text(value: Any) -> str:
@@ -589,9 +589,14 @@ def _svg_text(value: Any) -> str:
 
 
 def _node_width(label: str) -> float:
-    """Rough but stable: mono-ish glyphs at 12.5px, clamped so one long label cannot stretch
-    a whole column and a two-letter one does not become a dot."""
-    return max(72.0, min(168.0, 7.1 * len(label) + 24.0))
+    """Wide enough for its own text, whatever else happens to the layout.
+
+    0.62em per glyph is the advance of a monospace face at the size labels are drawn at, so
+    7.9px per character at 12.5px leaves a margin; the clamps stop one long label from
+    stretching a whole column and a two-letter one from becoming a dot. A box narrower than
+    its label is how text ended up printed outside the diagram.
+    """
+    return max(64.0, min(170.0, 7.9 * len(label) + 16.0))
 
 
 def _layered(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -653,41 +658,157 @@ def _edge_label(x: float, y: float, text: str, size: float = 0.0) -> str:
             f'{_svg_text(text)}</text>')
 
 
-def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """One placement, used by the SVG and by the .excalidraw side file.
+def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
+                      direction: str = "") -> Dict[str, Any]:
+    """Place the boxes and route the edges. The SVG and the .excalidraw file share this.
 
-    Two renderers sharing a layout is the point: the drawing and the editable scene have to
-    agree about where a box is, or editing the side file produces a different figure.
+    `right` reads as a pipeline. `down` is the default once a graph has more than three
+    layers: a five-column graph is wider than the reading measure, the browser shrinks it to
+    fit, and 12.5px type then arrives at about 7px. Rotating the flow is the only fix that
+    keeps type at the size it was measured for, and vertical space is free on a page.
     """
     layer = _layered(nodes, edges)
-    by_layer: Dict[int, List[Dict[str, Any]]] = {}
+    widths = {node["id"]: _node_width(node["label"]) for node in nodes}
+    groups: Dict[int, List[str]] = {}
     for node in nodes:                       # input order inside a layer: the model's own
-        by_layer.setdefault(layer[node["id"]], []).append(node)
-    widest = {L: max(_node_width(n["label"]) for n in group) for L, group in by_layer.items()}
+        groups.setdefault(layer[node["id"]], []).append(node["id"])
+    depths = sorted(groups)
+    label_w = max([0.62 * _FIG_EDGE_TEXT * len(str(edge.get("label") or "")) for edge in edges]
+                  or [0.0])
+    # the same label on parallel edges is one operation, printed once: a fan-out to three
+    # projections reads "multiply" three times otherwise, and crowds its own diagram
+    unique_labels = {(layer[edge["from"]], str(edge.get("label") or "")) for edge in edges
+                     if edge.get("from") in layer and str(edge.get("label") or "")}
+    bands: Dict[int, int] = {}
+    for band_key, _ in unique_labels:
+        bands[band_key] = bands.get(band_key, 0) + 1
+    stack = max(bands.values() or [1])
+    gap_y = 46.0 + 16.0 * (stack - 1)    # room for one label row per labelled edge in a band
+    if direction not in ("right", "down"):
+        across = sum(max(widths[i] for i in groups[L]) for L in depths) \
+            + (len(depths) - 1) * max(_FIG_LAYER_GAP, label_w + 18)
+        direction = "right" if len(depths) <= 3 and across <= 560 else "down"
 
     pad = 14.0
-    # The column gap has to hold the longest edge label, at the size it will actually be
-    # drawn. Type grows with the viewBox (see `scale` below), so reserve for the largest
-    # version: a label wider than its gap lands on the boxes on either side of it, which
-    # reads as a caption printed over a diagram.
-    label_w = max([0.62 * _FIG_EDGE_TEXT * 1.8 * len(str(edge.get("label") or ""))
-                   for edge in edges] or [0])
-    gap = max(_FIG_COL_GAP, min(230.0, label_w + 26))
-    xs: Dict[int, float] = {}
-    x = pad
-    for L in sorted(by_layer):
-        xs[L] = x
-        x += widest[L] + gap
-    columns_h = {L: len(g) * (_FIG_BOX_H + _FIG_ROW_GAP) - _FIG_ROW_GAP for L, g in by_layer.items()}
-    tallest = max(columns_h.values())
-    top = pad
-    y_of: Dict[str, float] = {}
-    for L, group in by_layer.items():
-        start = top + (tallest - columns_h[L]) / 2
-        for k, node in enumerate(group):
-            y_of[node["id"]] = start + k * (_FIG_BOX_H + _FIG_ROW_GAP)
-    return {"layer": layer, "widest": widest, "xs": xs, "y_of": y_of, "top": top,
-            "tallest": tallest, "pad": pad, "gap": gap, "width": x - gap + pad}
+    boxes: Dict[str, tuple] = {}
+    if direction == "right":
+        gap = max(_FIG_LAYER_GAP, label_w + 18)
+        columns: Dict[int, tuple] = {}
+        x = pad
+        for L in depths:
+            columns[L] = (x, max(widths[i] for i in groups[L]))
+            x += columns[L][1] + gap
+        tallest = max(len(groups[L]) for L in depths)
+        span = tallest * _FIG_BOX_H + (tallest - 1) * _FIG_ROW_GAP
+        for L in depths:
+            height = len(groups[L]) * _FIG_BOX_H + (len(groups[L]) - 1) * _FIG_ROW_GAP
+            top = pad + (span - height) / 2
+            for k, nid in enumerate(groups[L]):
+                boxes[nid] = (columns[L][0], top + k * (_FIG_BOX_H + _FIG_ROW_GAP),
+                              columns[L][1], _FIG_BOX_H)
+    else:
+        gap = gap_y
+        rows: Dict[int, float] = {}
+        y = pad
+        for L in depths:
+            rows[L] = y
+            y += _FIG_BOX_H + gap
+        widest = max(sum(widths[i] for i in groups[L]) + (len(groups[L]) - 1) * _FIG_ROW_GAP
+                     for L in depths)
+        for L in depths:
+            span = sum(widths[i] for i in groups[L]) + (len(groups[L]) - 1) * _FIG_ROW_GAP
+            x = pad + (widest - span) / 2
+            for nid in groups[L]:
+                boxes[nid] = (x, rows[L], widths[nid], _FIG_BOX_H)
+                x += widths[nid] + _FIG_ROW_GAP
+
+    # Labels stack inside a band: three edges leaving one node all want the same midpoint,
+    # and a fan-out with the same label on two of them printed one over the other.
+    seen_in_band: Dict[int, int] = {}
+    drawn_labels: set = set()
+
+    routed: List[Dict[str, Any]] = []
+    channel = 0
+    for index, edge in enumerate(edges):
+        src, dst = edge["from"], edge["to"]
+        if src not in boxes or dst not in boxes:
+            continue
+        sx, sy, sw, sh = boxes[src]
+        tx, ty, tw, th = boxes[dst]
+        text = str(edge.get("label") or "")
+        band = layer[src]
+        if text and (band, text) in drawn_labels:
+            text = ""                                  # already named on a parallel edge
+        elif text:
+            drawn_labels.add((band, text))
+        text_w = 0.62 * _FIG_EDGE_TEXT * len(text) + 10 if text else 0.0
+        ordinal = seen_in_band.get(band, 0)
+        if text:
+            seen_in_band[band] = ordinal + 1
+        slot = ordinal if text else 0
+        jump = abs(layer[dst] - layer[src])
+
+        if src == dst:                                    # a state that stays put
+            y0 = sy + sh * 0.3
+            routed.append({"points": [(sx + sw, y0), (sx + sw + 22, y0),
+                                      (sx + sw + 22, y0 + 18), (sx + sw, y0 + 18)],
+                           "head": (sx + sw, y0 + 18, -1, 0),
+                           "label": (sx + sw + text_w / 2 + 6, y0 + 9), "text": text})
+            continue
+
+        forward = layer[dst] > layer[src]
+        if direction == "right" and forward and jump == 1:
+            y1 = sy + sh / 2
+            y2 = ty + th / 2
+            # when the two boxes sit on one line the label lands ON the run between them, so
+            # its mask has to stay inside the gap
+            cx = sx + sw + max(_FIG_LAYER_GAP, label_w + 18) / 2 + ((index % 3) - 1) * 6
+            cx = max(sx + sw + text_w / 2 + 3, min(cx, tx - text_w / 2 - 3))
+            routed.append({"points": [(sx + sw, y1), (cx, y1), (cx, y2), (tx - 7, y2)],
+                           "head": (tx, y2, 1, 0),
+                           "label": (cx, (y1 + y2) / 2), "text": text})
+            continue
+        if direction == "down" and forward and jump == 1:
+            x1 = sx + sw / 2
+            x2 = tx + tw / 2
+            my = sy + sh + gap_y / 2
+            # one label row per edge, counted down from the row it left: 12px of mask above
+            # the baseline is enough to reach back into that row
+            routed.append({"points": [(x1, sy + sh), (x1, my), (x2, my), (x2, ty - 7)],
+                           "head": (x2, ty, 0, 1),
+                           "label": ((x1 + x2) / 2, sy + sh + 14 + slot * 16), "text": text})
+            continue
+
+        # everything else runs outside the figure in its own channel: a skip edge drawn
+        # straight would go through every row it skips over
+        channel += 1
+        if direction == "right":
+            bx = sx + sw / 2
+            yb = max(y + h for _, y, _, h in boxes.values()) + 18 + channel * 12
+            tx_mid = tx + tw / 2
+            routed.append({"points": [(bx, sy + sh), (bx, yb), (tx_mid, yb),
+                                      (tx_mid, ty + th + 7)],
+                           "head": (tx_mid, ty + th, 0, -1),
+                           "label": ((bx + tx_mid) / 2, yb + 2), "text": text})
+        else:
+            xr = max(x + w for x, _, w, _ in boxes.values()) + 20 + channel * 12
+            y1 = sy + sh / 2
+            y2 = ty + th / 2
+            routed.append({"points": [(sx + sw, y1), (xr, y1), (xr, y2), (tx + tw + 7, y2)],
+                           "head": (tx + tw, y2, 1, 0),
+                           "label": (xr + text_w / 2 + 6, (y1 + y2) / 2), "text": text})
+
+    label_w_max = {item["text"]: 0.62 * _FIG_EDGE_TEXT * len(item["text"]) + 10
+                   for item in routed if item["text"]}
+    right = max([x + w for x, _, w, _ in boxes.values()]
+                + [point[0] for item in routed for point in item["points"]]
+                + [item["label"][0] + label_w_max[item["text"]] / 2
+                   for item in routed if item["text"]] + [0.0])
+    bottom = max([y + h for _, y, _, h in boxes.values()]
+                 + [point[1] for item in routed for point in item["points"]]
+                 + [item["label"][1] + 2 for item in routed if item["text"]] + [0.0])
+    return {"direction": direction, "boxes": boxes, "edges": routed, "layer": layer,
+            "width": right + pad, "height": bottom + pad}
 
 
 def _diagram_svg(spec: Dict[str, Any]) -> str:
@@ -696,75 +817,32 @@ def _diagram_svg(spec: Dict[str, Any]) -> str:
     if len(nodes) < 2:
         return ""
     geo = _diagram_geometry(nodes, edges)
-    layer, widest = geo["layer"], geo["widest"]
-    xs, y_of, top, tallest, pad = geo["xs"], geo["y_of"], geo["top"], geo["tallest"], geo["pad"]
-    width = geo["width"]
-    # the figure is drawn at the page's width, so a wide graph is scaled DOWN on screen and its
-    # 12.5px labels would arrive at 8px. Grow the type with the drawing: the reader's width is
-    # fixed, the viewBox is not.
-    scale = max(1.0, min(1.8, width / 540.0))
-    node_style = f' style="font-size:{_FIG_TEXT * scale:.1f}px"' if scale > 1.02 else ""
-    edge_size = _FIG_EDGE_TEXT * scale if scale > 1.02 else 0.0
-
-    routed: List[str] = []
-    labels: List[str] = []
-    channel_n = 0
-    deepest = top + tallest
-    for j, edge in enumerate(edges):
-        src, dst = edge["from"], edge["to"]
-        if src not in y_of or dst not in y_of:
-            continue
-        text = str(edge.get("label") or "")
-        if src == dst:                                     # a state that stays put
-            x1 = xs[layer[src]] + widest[layer[src]]
-            y1 = y_of[src] + _FIG_BOX_H * 0.35
-            routed.append(f'<path class="ed" d="M {x1:.1f},{y1:.1f} h 26 v 16 h -26"/>')
-            labels.append(_edge_label(x1 + 13, y1 + 30, text, edge_size))
-            continue
-        ls, lt = layer[src], layer[dst]
-        if lt > ls:                                        # forward: exit right, enter left
-            x1 = xs[ls] + widest[ls]
-            y1 = y_of[src] + _FIG_BOX_H / 2
-            x2 = xs[lt]
-            y2 = y_of[dst] + _FIG_BOX_H / 2
-            cx = x1 + geo["gap"] / 2 + ((j % 3) - 1) * 6
-            stop = x2 - 7
-            routed.append(f'<path class="ed" d="M {x1:.1f},{y1:.1f} H {cx:.1f} V {y2:.1f} H {stop:.1f}"/>')
-            routed.append(_arrow(x2, y2, 1, 0))
-            labels.append(_edge_label(cx, (y1 + y2) / 2, text, edge_size))
-            continue
-        # same layer or backward: run under the figure, in its own channel per edge
-        bx = xs[ls] + widest[ls] / 2
-        by = y_of[src] + _FIG_BOX_H
-        tx = xs[lt] + widest[lt] / 2
-        ty = y_of[dst] + _FIG_BOX_H
-        yb = top + tallest + 20 + (channel_n % 4) * 12
-        channel_n += 1
-        deepest = max(deepest, yb)
-        routed.append(f'<path class="ed" d="M {bx:.1f},{by:.1f} V {yb:.1f} H {tx:.1f} V {ty + 7:.1f}"/>')
-        routed.append(_arrow(tx, ty, 0, -1))
-        labels.append(_edge_label((bx + tx) / 2, yb + 2, text, edge_size))
-
-    boxes = []
+    parts: List[str] = []
     for node in nodes:
-        nid = node["id"]
-        L = layer[nid]
+        box = geo["boxes"].get(node["id"])
+        if not box:
+            continue
+        x, y, w, h = box
         cls = "nd on" if str(node.get("group") or "").strip() else "nd"
-        boxes.append(
-            f'<g><rect class="{cls}" x="{xs[L]:.1f}" y="{y_of[nid]:.1f}" '
-            f'width="{widest[L]:.1f}" height="{_FIG_BOX_H}"/>'
-            f'<text x="{xs[L] + widest[L] / 2:.1f}" y="{y_of[nid] + _FIG_BOX_H / 2 + 4.4:.1f}" '
-            f'text-anchor="middle"{node_style}>{_svg_text(node["label"])}'
-            f'<title>{_svg_text(node["label"])}</title></text></g>')
-
-    height = deepest + pad + 6
+        parts.append(f'<g><rect class="{cls}" x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" '
+                     f'height="{h}"/>'
+                     f'<text x="{x + w / 2:.1f}" y="{y + h / 2 + 4.4:.1f}" text-anchor="middle">'
+                     f'{_svg_text(node["label"])}'
+                     f'<title>{_svg_text(node["label"])}</title></text></g>')
+    for edge in geo["edges"]:
+        path = "M " + " L ".join(f"{px:.1f},{py:.1f}" for px, py in edge["points"])
+        parts.append(f'<path class="ed" d="{path}"/>')
+        parts.append(_arrow(*edge["head"]))
+        parts.append(_edge_label(edge["label"][0], edge["label"][1], edge["text"]))
     spoken = "; ".join(
         f'{_spoken_label(next((n["label"] for n in nodes if n["id"] == e["from"]), ""))} to '
         f'{_spoken_label(next((n["label"] for n in nodes if n["id"] == e["to"]), ""))}'
         for e in edges[:6]) or ", ".join(_spoken_label(n["label"]) for n in nodes)
-    return (f'<svg class="fig-svg" viewBox="0 0 {width:.0f} {height:.0f}" '
+    # allow a narrow figure to breathe up to 1.15x its natural width, and let a wide one shrink
+    return (f'<svg class="fig-svg" style="max-width:{geo["width"] * 1.15:.0f}px" '
+            f'viewBox="0 0 {geo["width"]:.0f} {geo["height"]:.0f}" '
             f'role="img" aria-label="{html.escape("Diagram: " + spoken, quote=True)}">'
-            f'{"".join(boxes)}{"".join(routed)}{"".join(labels)}</svg>')
+            f'{"".join(parts)}</svg>')
 
 
 def _sequence_svg(spec: Dict[str, Any]) -> str:
@@ -777,9 +855,6 @@ def _sequence_svg(spec: Dict[str, Any]) -> str:
     head_h = 32.0
     x_of = {actor: pad + i * col for i, actor in enumerate(actors)}
     width = pad * 2 + (len(actors) - 1) * col + 120
-    scale = max(1.0, min(1.8, width / 540.0))    # same reason as the diagram: keep type readable
-    node_style = f' style="font-size:{_FIG_TEXT * scale:.1f}px"' if scale > 1.02 else ""
-    edge_size = _FIG_EDGE_TEXT * scale if scale > 1.02 else 0.0
     top = pad
     first_msg = top + head_h + 34
     step = 42.0
@@ -789,7 +864,7 @@ def _sequence_svg(spec: Dict[str, Any]) -> str:
     for actor in actors:
         x = x_of[actor]
         parts.append(f'<rect class="nd" x="{x:.1f}" y="{top:.1f}" width="120" height="{head_h}"/>'
-                     f'<text x="{x + 60:.1f}" y="{top + head_h / 2 + 4.4:.1f}" text-anchor="middle"{node_style}>'
+                     f'<text x="{x + 60:.1f}" y="{top + head_h / 2 + 4.4:.1f}" text-anchor="middle">'
                      f'{_svg_text(actor)}</text>')
         parts.append(f'<line class="ll" x1="{x + 60:.1f}" y1="{top + head_h:.1f}" '
                      f'x2="{x + 60:.1f}" y2="{bottom:.1f}"/>')
@@ -806,17 +881,18 @@ def _sequence_svg(spec: Dict[str, Any]) -> str:
             x = x_of[src] + 60
             parts.append(f'<path class="{lane}" d="M {x:.1f},{y - 8:.1f} h 34 v 20 h -34"/>')
             parts.append(_arrow(x + 7, y + 12, -1, 0))
-            parts.append(_edge_label(x + 44, y - 6, text, edge_size) if text else "")
+            parts.append(_edge_label(x + 44, y - 6, text) if text else "")
         else:
             x1 = x_of[src] + 60
             x2 = x_of[dst] + 60
             direction = 1 if x2 > x1 else -1
             parts.append(f'<path class="{lane}" d="M {x1:.1f},{y:.1f} H {x2 - 8 * direction:.1f}"/>')
             parts.append(_arrow(x2, y, direction, 0))
-            parts.append(_edge_label((x1 + x2) / 2, y - 7, text, edge_size) if text else "")
+            parts.append(_edge_label((x1 + x2) / 2, y - 7, text) if text else "")
         spoken.append(f'{_spoken_label(src)} to {_spoken_label(dst)}: {_spoken_label(text)}')
 
-    return (f'<svg class="fig-svg" viewBox="0 0 {width:.0f} {bottom + pad:.0f}" '
+    return (f'<svg class="fig-svg" style="max-width:{width * 1.15:.0f}px" '
+            f'viewBox="0 0 {width:.0f} {bottom + pad:.0f}" '
             f'role="img" aria-label="{html.escape("Sequence: " + "; ".join(spoken[:8]), quote=True)}">'
             f'{"".join(parts)}</svg>')
 
@@ -852,45 +928,28 @@ def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]
         if len(nodes) < 2:
             return {}
         geo = _diagram_geometry(nodes, edges)
-        layer, widest, xs, y_of = geo["layer"], geo["widest"], geo["xs"], geo["y_of"]
         for node in nodes:
-            nid, L = node["id"], layer[node["id"]]
-            rid, tid = f"fig-{nid}", f"fig-{nid}-label"
-            x, y, w = xs[L], y_of[nid], widest[L]
+            box = geo["boxes"].get(node["id"])
+            if not box:
+                continue
+            x, y, w, h = box
+            rid, tid = f"fig-{node['id']}", f"fig-{node['id']}-label"
             elements.append({
-                "type": "rectangle", "id": rid, "x": x, "y": y, "width": w, "height": _FIG_BOX_H,
+                "type": "rectangle", "id": rid, "x": x, "y": y, "width": w, "height": h,
                 "angle": 0, "strokeColor": "#1e1e1e",
                 "backgroundColor": "#e7f5ff" if node.get("group") else "#f8f9fa",
                 "fillStyle": "solid", "strokeWidth": 2, "roughness": 1, "opacity": 100,
                 "groupIds": [], "frameId": None, "roundness": {"type": 3},
                 "seed": len(elements) * 7 + 3, "version": 1, "versionNonce": 1,
                 "isDeleted": False, "boundElements": [{"type": "text", "id": tid}]})
-            elements.append(text_el(tid, node["label"], x + 2, y + _FIG_BOX_H / 2 - 9,
+            elements.append(text_el(tid, node["label"], x + 2, y + h / 2 - 9,
                                     max(10.0, w - 4), 18, 13, container=rid))
-        for j, edge in enumerate(edges):
-            src, dst = edge["from"], edge["to"]
-            if src not in y_of or dst not in y_of:
-                continue
-            ls, lt = layer[src], layer[dst]
-            if src == dst:
-                x1 = xs[ls] + widest[ls]
-                y1 = y_of[src] + _FIG_BOX_H * 0.35
-                points = [[0, 0], [26, 0], [26, 16], [0, 16]]
-            elif lt > ls:
-                x1 = xs[ls] + widest[ls]
-                y1 = y_of[src] + _FIG_BOX_H / 2
-                cx = x1 + 24 + (j % 3) * 12
-                y2 = y_of[dst] + _FIG_BOX_H / 2
-                points = [[0, 0], [cx - x1, 0], [cx - x1, y2 - y1],
-                          [xs[lt] - x1, y2 - y1]]
-            else:
-                x1 = xs[ls] + widest[ls] / 2
-                y1 = y_of[src] + _FIG_BOX_H
-                yb = max(y_of.values()) + _FIG_BOX_H + 20 + 12 * j
-                points = [[0, 0], [0, yb - y1], [xs[lt] + widest[lt] / 2 - x1, yb - y1],
-                          [xs[lt] + widest[lt] / 2 - x1, y_of[dst] + _FIG_BOX_H - y1]]
+        for j, edge in enumerate(geo["edges"]):
+            origin_x, origin_y = edge["points"][0]
+            points = [[round(px - origin_x, 2), round(py - origin_y, 2)]
+                      for px, py in edge["points"]]
             elements.append({
-                "type": "arrow", "id": f"fig-edge-{j}", "x": x1, "y": y1,
+                "type": "arrow", "id": f"fig-edge-{j}", "x": origin_x, "y": origin_y,
                 "width": abs(points[-1][0]), "height": abs(points[-1][1]),
                 "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent",
                 "fillStyle": "solid", "strokeWidth": 1.5, "roughness": 1, "opacity": 100,
@@ -899,11 +958,10 @@ def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]
                 "isDeleted": False, "boundElements": [], "points": points,
                 "lastCommittedPoint": None, "startBinding": None, "endBinding": None,
                 "startArrowhead": None, "endArrowhead": "arrow", "elbowed": False})
-            if edge.get("label"):
-                lx = x1 + points[-1][0] / 2
-                ly = y1 + points[-1][1] / 2 - 9
-                elements.append(text_el(f"fig-edge-{j}-label", str(edge["label"]), lx, ly,
-                                        max(20.0, 6.4 * len(str(edge["label"]))), 16, 11))
+            if edge["text"]:
+                lx, ly = edge["label"]
+                elements.append(text_el(f"fig-edge-{j}-label", edge["text"], lx - 40, ly - 16,
+                                        80, 16, 11))
     elif kind == "sequence":
         actors = [str(a) for a in (spec.get("actors") or []) if str(a).strip()]
         messages = [m for m in (spec.get("messages") or []) if isinstance(m, dict)]
@@ -1479,7 +1537,7 @@ figure.fig{margin:2rem 0}
 .fig-svg .reply{stroke-dasharray:4 4;opacity:.8}
 .fig-svg .ll{stroke:var(--line);stroke-width:1.1;stroke-dasharray:3 5}
 .fig-svg .ah{fill:var(--muted)}
-.fig-svg .elabel{fill:var(--muted);font-size:10.5px}
+.fig-svg .elabel{fill:color-mix(in srgb,var(--ink) 72%,var(--bg));font-size:11px}
 .fig-svg .elabel-bg{fill:var(--bg)}
 
 /* ---- layouts: the identity's third axis has to change something real ---- */

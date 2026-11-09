@@ -948,30 +948,65 @@ class TestSvgFigures(unittest.TestCase):
         self.assertIsNone(clean["sections"][0]["visual"])
         self.assertTrue([n for n in notes if "figure" in n])
 
-    def test_an_edge_label_stays_inside_its_gap(self):
-        """A label wider than the column gap prints on top of the boxes either side of it."""
+    def test_labels_stay_off_the_boxes_and_off_each_other(self):
+        """A fan-out with three labelled edges is where this fell over: three masks wanted the
+        same midpoint, and each wanted the row above it."""
         from xml.etree import ElementTree
-        raw = {"type": "diagram",
-               "nodes": [{"id": "a", "label": "residual stream"},
-                         {"id": "b", "label": "next logits"},
-                         {"id": "c", "label": "feed-forward"}],
-               "edges": [{"from": "a", "to": "b", "label": "second pass"},
-                         {"from": "b", "to": "c", "label": "and again"}]}
-        def num(element, key: str) -> float:
-            return float(str(element.get(key) or "0"))
+        cases = [
+            {"type": "diagram",
+             "nodes": [{"id": "x", "label": "token vectors"}, {"id": "q", "label": "queries W_Q"},
+                       {"id": "k", "label": "keys W_K"}, {"id": "v", "label": "values W_V"},
+                       {"id": "s", "label": "scores q dot k"}],
+             "edges": [{"from": "x", "to": "q", "label": "multiply"},
+                       {"from": "x", "to": "k", "label": "multiply"},
+                       {"from": "x", "to": "v", "label": "multiply"},
+                       {"from": "q", "to": "s", "label": "compare"},
+                       {"from": "k", "to": "s", "label": "compare"}]},
+            {"type": "diagram",
+             "nodes": [{"id": "a", "label": "residual stream"},
+                       {"id": "b", "label": "next logits"},
+                       {"id": "c", "label": "feed-forward"}],
+             "edges": [{"from": "a", "to": "b", "label": "second pass"},
+                       {"from": "b", "to": "c", "label": "and again"}]},
+        ]
 
-        tree = ElementTree.fromstring(self._render(raw))
-        boxes = [e for e in tree.iter() if e.get("class") == "nd"]
-        masks = [e for e in tree.iter() if e.get("class") == "elabel-bg"]
-        self.assertTrue(masks)
-        for mask in masks:
-            mx, mw = num(mask, "x"), num(mask, "width")
-            for box in boxes:
-                bx, bw = num(box, "x"), num(box, "width")
-                overlap = min(mx + mw, bx + bw) - max(mx, bx)
-                self.assertLessEqual(round(overlap, 1), 0.0,
-                                     f"edge label [{mx:.0f}..{mx + mw:.0f}] runs into a box "
-                                     f"[{bx:.0f}..{bx + bw:.0f}]")
+        def rect(element):
+            return tuple(float(str(element.get(key) or "0"))
+                         for key in ("x", "y", "width", "height"))
+
+        def overlap(one, two):
+            ax, ay, aw, ah = one
+            bx, by, bw, bh = two
+            return (min(ax + aw, bx + bw) - max(ax, bx) > 0.5
+                    and min(ay + ah, by + bh) - max(ay, by) > 0.5)
+
+        for raw in cases:
+            tree = ElementTree.fromstring(self._render(raw))
+            boxes = [rect(e) for e in tree.iter() if e.get("class") == "nd"]
+            masks = [rect(e) for e in tree.iter() if e.get("class") == "elabel-bg"]
+            self.assertTrue(masks)
+            for mask in masks:
+                for box in boxes:
+                    self.assertFalse(overlap(mask, box), f"label {mask} covers box {box}")
+            for i, one in enumerate(masks):
+                for two in masks[i + 1:]:
+                    self.assertFalse(overlap(one, two), f"labels {one} and {two} collide")
+
+    def test_a_long_chain_turns_vertical_instead_of_shrinking(self):
+        """Five columns are wider than the reading measure; the browser would shrink the
+        whole figure and 12.5px type would arrive at 7px."""
+        raw = {"type": "diagram",
+               "nodes": [{"id": str(i), "label": f"step {i}"} for i in range(5)],
+               "edges": [{"from": str(i), "to": str(i + 1), "label": "then"} for i in range(4)]}
+        clean, _ = self._figure(raw)
+        geo = render._diagram_geometry(clean["nodes"], clean["edges"])
+        self.assertEqual(geo["direction"], "down")
+        self.assertLessEqual(geo["width"], 560)
+        short, _ = self._figure({"type": "diagram",
+                                 "nodes": [{"id": "a", "label": "in"}, {"id": "b", "label": "out"}],
+                                 "edges": [{"from": "a", "to": "b"}]})
+        self.assertEqual(render._diagram_geometry(short["nodes"], short["edges"])["direction"],
+                         "right")
 
     def test_the_side_scene_agrees_with_the_drawing(self):
         clean, _ = self._figure(dict(self.DIAGRAM))
