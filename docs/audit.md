@@ -53,9 +53,9 @@ captions, source titles and URLs, video titles and ids, reading links.
 before applying its markup subset; `_svg_text` escapes SVG. A `javascript:` source URL never
 reaches the page.
 
-Path traversal: `_slug()` reduces anything to `[a-z0-9-]`, so `../../etc/passwd` becomes
-`etc-passwd`; every write lands under the plugin's own data directory or the configured
-`courses_dir`.
+Path traversal: `_slug()` reduces anything to `[a-z0-9-]` (a dotted-upwards path collapses to
+its last segment), so a hostile topic cannot escape the courses directory; every write lands
+under the plugin's own data directory or the configured `courses_dir`.
 
 Subprocess: the single `subprocess.run` is `yt-dlp` with an argv list (no shell), and the search
 query is passed as `ytsearchN:<query>` so a leading `-` cannot become a flag.
