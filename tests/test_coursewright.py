@@ -1,4 +1,4 @@
-"""Regression tests for coursewright's audit findings.
+"""Regression tests for coursewright.
 
 Run with:  python3 -m unittest discover -s tests -t . -v
 (no pytest required, and no network: every model/web call is faked)

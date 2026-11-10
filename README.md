@@ -120,7 +120,15 @@ leaflet — and every level walks at least one example through its actual values
 | `max_videos` | `6` | videos collected per course |
 | `research_timeout` | `150` | seconds spent searching and reading before it writes anyway |
 | `firecrawl_url` | `""` | scraper used when the host extractor returns nothing: empty probes a local stack on `http://localhost:3002`, `off` disables it, a full URL points anywhere |
-| `firecrawl_key` | `""` | bearer token for that scraper; empty falls back to `FIRECRAWL_API_KEY` |
+| `firecrawl_key` | `""` | bearer token for that scraper, kept as a Hermes secret (`.env` name `FIRECRAWL_API_KEY`) and read through the secret scope |
+
+### Debugging a build
+
+`COURSEWRIGHT_DUMP=<dir>` writes each section's raw model reply, and the version it was coerced
+into, under that directory. It is off unless you set it yourself, it is the only place the
+plugin writes outside its own data directory, and it only ever contains prompts and model
+output — the same text the course is built from. Use it when a section comes out wrong and you
+want to see what the model actually said.
 
 ## What it needs from the host
 
