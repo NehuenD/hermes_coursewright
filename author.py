@@ -12,6 +12,7 @@ carrying a warning rather than sinking the whole build.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 MAX_SECTIONS = 8
 _SECTION_TOKENS = 6000
+_REPAIR_TOKENS = 2600
 _PLAN_TOKENS = 1400
 
 BLOCK_MENU = """Available block kinds (use several different ones; never invent a kind):
@@ -220,23 +222,62 @@ def _ask(ctx, *, instructions: str, payload: str, purpose: str, max_tokens: int,
     """One structured call through the host model; None on a failed response."""
     try:
         result = ctx.llm.complete_structured(
-            instructions=instructions,
-            input=[{"type": "text", "text": payload}],
-            json_mode=json_mode,
-            purpose=purpose,
-            temperature=0.4,
-            max_tokens=max_tokens,
-            timeout=300,
+            **_ask_kwargs(instructions=instructions, payload=payload, purpose=purpose,
+                          max_tokens=max_tokens, json_mode=json_mode)
         )
     except Exception as exc:  # trust gate, provider error, timeout
-        _LAST_ERROR[0] = f"{type(exc).__name__}: {exc}"
-        # A denied trust gate is terminal: every later call fails the same way, so the build
-        # should stop and say so rather than draft eight placeholder sections.
-        if isinstance(exc, PermissionError) or type(exc).__name__ == "PluginLlmTrustError":
-            logger.error("coursewright: the host refused model access: %s", exc)
-            raise ModelUnavailable(str(exc)) from exc
-        logger.warning("coursewright: %s call failed: %s", purpose, exc)
+        _call_failed(exc, purpose)
         return None
+    return _parsed(result)
+
+
+async def _ask_async(ctx, *, instructions: str, payload: str, purpose: str, max_tokens: int,
+                     json_mode: bool = True) -> Optional[Any]:
+    """The same call on the host's async sibling, so sections can be drafted at once.
+
+    A host without `acomplete_structured` still answers: this falls back to the sync path,
+    which is slower but never wrong.
+    """
+    call = getattr(getattr(ctx, "llm", None), "acomplete_structured", None)
+    if call is None:
+        return _ask(ctx, instructions=instructions, payload=payload, purpose=purpose,
+                    max_tokens=max_tokens, json_mode=json_mode)
+    try:
+        result = await call(
+            **_ask_kwargs(instructions=instructions, payload=payload, purpose=purpose,
+                          max_tokens=max_tokens, json_mode=json_mode)
+        )
+    except Exception as exc:
+        _call_failed(exc, purpose)
+        return None
+    return _parsed(result)
+
+
+def _ask_kwargs(*, instructions: str, payload: str, purpose: str, max_tokens: int,
+                json_mode: bool) -> Dict[str, Any]:
+    return dict(
+        instructions=instructions,
+        input=[{"type": "text", "text": payload}],
+        json_mode=json_mode,
+        purpose=purpose,
+        temperature=0.4,
+        max_tokens=max_tokens,
+        timeout=300,
+    )
+
+
+def _call_failed(exc: Exception, purpose: str) -> None:
+    """Record a failed call; a denied trust gate is terminal and stops the build."""
+    _LAST_ERROR[0] = f"{type(exc).__name__}: {exc}"
+    # A denied trust gate is terminal: every later call fails the same way, so the build
+    # should stop and say so rather than draft eight placeholder sections.
+    if isinstance(exc, PermissionError) or type(exc).__name__ == "PluginLlmTrustError":
+        logger.error("coursewright: the host refused model access: %s", exc)
+        raise ModelUnavailable(str(exc)) from exc
+    logger.warning("coursewright: %s call failed: %s", purpose, exc)
+
+
+def _parsed(result: Any) -> Optional[Any]:
     parsed = getattr(result, "parsed", None)
     if parsed is not None:
         return parsed
@@ -488,6 +529,121 @@ def _exercise_kind(index: int) -> str:
     return "recall" if index % 2 else "mcq"
 
 
+def _section_problems_for(section: Dict[str, Any], index: int) -> List[str]:
+    """Structural problems, plus whether the exercise is the kind this section was told to write."""
+    problems = _section_problems(section)
+    required_kind = _exercise_kind(index)
+    got_kind = (section.get("exercise") or {}).get("kind")
+    if got_kind and got_kind != required_kind:
+        problems.append(f"this section's exercise must be a {required_kind}, not a {got_kind}")
+    return problems
+
+
+_LEVELS = ("novice", "intermediate", "advanced")
+
+
+def _levels_named(problems: List[str]) -> List[str]:
+    """The depths a problem list blames, or [] when any problem is about the whole section.
+
+    A repair can only touch depths: a missing figure or exercise sits outside them, so those
+    problems send the section back through a full draft instead of a repair.
+    """
+    named: List[str] = []
+    for problem in problems:
+        head, sep, _ = problem.partition(":")
+        head = head.strip().lower()
+        if not sep or head not in _LEVELS:
+            return []
+        if head not in named:
+            named.append(head)
+    return named
+
+
+def _repair_prompt(plan: Dict[str, Any], index: int, section: Dict[str, Any], levels: List[str],
+                   problems: List[str], language: str) -> tuple[str, str]:
+    """Instructions and payload for rewriting only the depths that failed."""
+    brief = plan["sections"][index]
+    current = {level: (section.get("levels") or {}).get(level) for level in levels}
+    template = """You are repairing <<LEVELS>> of one section of a course called "<<TITLE>>".
+The rest of the section is finished and stays exactly as it is; you do not rewrite it.
+
+The section is "<<SECTION>>" and its job is: <<TEACHES>>
+Its worked example: <<EXAMPLE>>
+
+The depth you are rewriting, as it stands now. Keep every claim that is right, keep the
+example, keep the voice; fix what the problems name and change nothing else:
+<<CURRENT>>
+
+<<LEVEL_RULES>>
+
+<<BLOCK_MENU>>
+
+<<HARD_RULES>>
+
+Return ONE JSON object and nothing else:
+{"levels": {<<SHAPE>>}}
+Write only <<LEVELS>>. Do not return the other depths, the exercise, the figure or the title.
+
+What is wrong with what you are rewriting:
+<<PROBLEMS>>"""
+    shape = ", ".join(f'"{level}": {{"blocks": [{{"kind": "...", ...}}]}}' for level in levels)
+    instructions = (template
+                    .replace("<<LEVELS>>", " and ".join(levels))
+                    .replace("<<TITLE>>", str(plan["title"]))
+                    .replace("<<SECTION>>", str(brief["title"]))
+                    .replace("<<TEACHES>>", str(brief.get("teaches") or brief["title"]))
+                    .replace("<<EXAMPLE>>", str(brief.get("example")
+                                                 or "the one the section already walks through"))
+                    .replace("<<CURRENT>>", json.dumps(current, indent=1, ensure_ascii=False)[:9000])
+                    .replace("<<LEVEL_RULES>>", LEVEL_RULES)
+                    .replace("<<BLOCK_MENU>>", BLOCK_MENU.replace("{FIGURES}", FIGURE_MENU))
+                    .replace("<<HARD_RULES>>", HARD_RULES.replace("{language}", language))
+                    .replace("<<SHAPE>>", shape)
+                    .replace("<<PROBLEMS>>", "\n".join(f"- {problem}" for problem in problems[:6])))
+    payload = (f"Section {index + 1}/{len(plan['sections'])}: {brief['title']}\n"
+               f"Depth to rewrite: {', '.join(levels)}")
+    return instructions, payload
+
+
+def repair_levels(ctx, plan: Dict[str, Any], index: int, section: Dict[str, Any],
+                  levels: List[str], problems: List[str], *, language: str = "en"
+                  ) -> Optional[Dict[str, Any]]:
+    """Re-ask for the failing depths only; None when nothing usable came back."""
+    instructions, payload = _repair_prompt(plan, index, section, levels, problems, language)
+    raw = _ask(ctx, instructions=instructions, payload=payload,
+               purpose=f"coursewright.repair.{index + 1}", max_tokens=_REPAIR_TOKENS)
+    return merge_repair(section, raw, levels)
+
+
+async def repair_levels_async(ctx, plan: Dict[str, Any], index: int, section: Dict[str, Any],
+                              levels: List[str], problems: List[str], *, language: str = "en"
+                              ) -> Optional[Dict[str, Any]]:
+    """The async sibling of :func:`repair_levels`."""
+    instructions, payload = _repair_prompt(plan, index, section, levels, problems, language)
+    raw = await _ask_async(ctx, instructions=instructions, payload=payload,
+                           purpose=f"coursewright.repair.{index + 1}", max_tokens=_REPAIR_TOKENS)
+    return merge_repair(section, raw, levels)
+
+
+def merge_repair(section: Dict[str, Any], raw: Any, levels: List[str]) -> Optional[Dict[str, Any]]:
+    """Splice repaired depths into a copy of the section; None when nothing usable came back."""
+    if not isinstance(raw, dict):
+        return None
+    bodies = raw.get("levels") if isinstance(raw.get("levels"), dict) else raw
+    if not isinstance(bodies, dict):
+        return None
+    merged = copy.deepcopy(section)
+    into = merged.get("levels")
+    if not isinstance(into, dict):
+        into = merged["levels"] = {}
+    for level in levels:
+        body = bodies.get(level)
+        if isinstance(body, dict) and isinstance(body.get("blocks"), list) and body["blocks"]:
+            into[level] = body
+    return merged if any(isinstance(into.get(level), dict) and into[level].get("blocks")
+                         for level in levels) else None
+
+
 def draft_section(ctx, plan: Dict[str, Any], index: int, *, language: str = "en",
                   sources: str = "", retry_errors: Optional[List[str]] = None) -> Dict[str, Any]:
     """Stage 2 for one section. Always returns a section dict."""
@@ -504,17 +660,54 @@ def draft_section(ctx, plan: Dict[str, Any], index: int, *, language: str = "en"
     section = _coerce_section(raw, plan, index)
     if os.environ.get("COURSEWRIGHT_DUMP"):
         _dump(index, "coerced", section)
-    problems = _section_problems(section)
-    required_kind = _exercise_kind(index)
-    got_kind = (section.get("exercise") or {}).get("kind")
-    if got_kind and got_kind != required_kind:
-        problems.append(f"this section's exercise must be a {required_kind}, not a {got_kind}")
+    problems = _section_problems_for(section, index)
+    if problems and not retry_errors:
+        levels = _levels_named(problems)
+        if levels:
+            repaired = repair_levels(ctx, plan, index, section, levels, problems, language=language)
+            if repaired is not None:
+                section, problems = repaired, _section_problems_for(repaired, index)
     if problems and not retry_errors:
         logger.info("coursewright: retrying section %s (%s)", index + 1, problems[:2])
         return draft_section(ctx, plan, index, language=language, sources=sources,
                              retry_errors=problems)
     if problems:
         # numbered, so the assembler can clear exactly the note its own repair resolved
+        section.setdefault("_warnings", []).extend(
+            f"section {index + 1}: {problem}" for problem in problems)
+    return section
+
+
+async def draft_section_async(ctx, plan: Dict[str, Any], index: int, *, language: str = "en",
+                              sources: str = "",
+                              retry_errors: Optional[List[str]] = None) -> Dict[str, Any]:
+    """The async sibling of :func:`draft_section`, for drafting several at once."""
+    total = len(plan["sections"])
+    instructions, payload = _section_prompt(plan, index, total, language, sources)
+    if retry_errors:
+        payload += ("\nYour previous answer had these problems; fix them and return the "
+                    "whole JSON object again:\n- " + "\n- ".join(retry_errors[:6]))
+
+    raw = await _ask_async(ctx, instructions=instructions, payload=payload,
+                           purpose=f"coursewright.section.{index + 1}", max_tokens=_SECTION_TOKENS)
+    if os.environ.get("COURSEWRIGHT_DUMP"):
+        _dump(index, "raw", raw)
+    section = _coerce_section(raw, plan, index)
+    if os.environ.get("COURSEWRIGHT_DUMP"):
+        _dump(index, "coerced", section)
+    problems = _section_problems_for(section, index)
+    if problems and not retry_errors:
+        levels = _levels_named(problems)
+        if levels:
+            repaired = await repair_levels_async(ctx, plan, index, section, levels, problems,
+                                                 language=language)
+            if repaired is not None:
+                section, problems = repaired, _section_problems_for(repaired, index)
+    if problems and not retry_errors:
+        logger.info("coursewright: retrying section %s (%s)", index + 1, problems[:2])
+        return await draft_section_async(ctx, plan, index, language=language, sources=sources,
+                                         retry_errors=problems)
+    if problems:
         section.setdefault("_warnings", []).extend(
             f"section {index + 1}: {problem}" for problem in problems)
     return section

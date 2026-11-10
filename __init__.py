@@ -13,6 +13,8 @@ Command:
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import json
@@ -42,6 +44,7 @@ _SAMPLES = _PLUGIN_DIR / "samples"
 # The planner is allowed eight sections, so the builder must allow eight too: capping the
 # build at seven silently dropped the closing section every plan was told to write.
 _MAX_SECTIONS_BUILT = 8
+_MAX_CONCURRENCY = 4
 
 # Slash commands get 30 s; a build takes minutes. Builds run on worker threads, one per topic.
 _BUILD_LOCK = threading.Lock()
@@ -448,13 +451,55 @@ def make_plan(ctx, args: dict) -> dict:
 # draft + build
 # --------------------------------------------------------------------------
 def _draft_all(ctx, plan: dict, language: str, max_sections: int, sources: str = "") -> list:
-    sections = []
     total = min(max_sections, len(plan["sections"]))
+    concurrency = _draft_concurrency(ctx)
+    if concurrency > 1 and hasattr(getattr(ctx, "llm", None), "acomplete_structured"):
+        return _draft_parallel(ctx, plan, language, total, sources, concurrency)
+    sections = []
     for index in range(total):
         logger.info("coursewright: drafting %s/%s — %s", index + 1, total,
                     plan["sections"][index]["title"])
         sections.append(author.draft_section(ctx, plan, index, language=language, sources=sources))
     return sections
+
+
+def _draft_concurrency(ctx) -> int:
+    """How many sections may be written at once; 1 is the one-at-a-time path."""
+    try:
+        wanted = _as_int(ctx.get_config("draft_concurrency", default=3))
+    except Exception:
+        return 1
+    return max(1, min(_MAX_CONCURRENCY, wanted or 1))
+
+
+def _draft_parallel(ctx, plan: dict, language: str, total: int, sources: str,
+                    concurrency: int) -> list:
+    """Draft `total` sections with at most `concurrency` model calls in flight.
+
+    Sections are written independently: each one gets its brief and the previous brief's
+    summary from the plan, never the previous *drafted* section, so the order of completion
+    cannot change what any section says. The results are put back in plan order by index.
+    """
+    async def run() -> list:
+        gate = asyncio.Semaphore(concurrency)
+
+        async def one(index: int):
+            async with gate:
+                logger.info("coursewright: drafting %s/%s — %s", index + 1, total,
+                            plan["sections"][index]["title"])
+                return await author.draft_section_async(ctx, plan, index, language=language,
+                                                        sources=sources)
+
+        return list(await asyncio.gather(*(one(index) for index in range(total))))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run())
+    # A build can be started from inside the gateway's event loop; the fan-out gets its own
+    # loop on a helper thread rather than trying to nest one.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(run())).result()
 
 
 def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "") -> dict:

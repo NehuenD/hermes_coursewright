@@ -117,6 +117,7 @@ leaflet — and every level walks at least one example through its actual values
 | `enable_research` | `true` | search and read before writing |
 | `enable_videos` | `true` | look for videos |
 | `max_sources` | `12` | pages read per course |
+| `draft_concurrency` | `3` | sections written at once (1 to 4); 1 is one call at a time |
 | `max_videos` | `6` | videos collected per course |
 | `research_timeout` | `150` | seconds spent searching and reading before it writes anyway |
 | `firecrawl_url` | `""` | scraper used when the host extractor returns nothing: empty probes a local stack on `http://localhost:3002`, `off` disables it, a full URL points anywhere |
@@ -165,9 +166,10 @@ The whole list, because a plugin that reads the web and runs a tool should say s
   the finished page under `courses_dir` (`~/Courses` by default — point it elsewhere, or set it
   empty to disable the copy). `COURSEWRIGHT_DUMP` is the only other destination, and only when
   you set it.
-- **Long-running.** A course takes minutes: one model call per section, plus research. Run it in
-  the background (`background: true`, or `/course`) and it keeps going after the tool returns,
-  then posts the finished course into the chat. Nothing is left running after a build ends.
+- **Long-running.** A course takes minutes: one model call per section, three of them at a time
+  by default, plus research. Run it in the background (`background: true`, or `/course`) and it
+  keeps going after the tool returns, then posts the finished course into the chat. Nothing is
+  left running after a build ends.
 - **Credentials.** None of its own. The optional scraper key is a `secret` config key, stored
   and read through Hermes' secret scope; the model calls use the host's own provider.
 - **Telemetry.** None.

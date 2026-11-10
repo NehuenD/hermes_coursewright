@@ -1,5 +1,5 @@
 name: coursewright
-version: 0.4.6
+version: 0.5.0
 manifest_version: 2
 requires_hermes: ">=0.23"   # ctx.inject_message, ctx.state, manifest v2
 license: MIT
@@ -50,6 +50,14 @@ config_schema:
     default: true
     label: Research the topic
     description: Search and read real sources before writing, and list what was used.
+  draft_concurrency:
+    type: int
+    default: 3
+    label: Sections drafted at once
+    description: >-
+      How many sections the build writes in parallel, 1 to 4. Sections are independent, so
+      three at once turns an eight-section course from about twenty-five minutes into about
+      ten. Set it to 1 for one call at a time.
   max_videos:
     type: int
     default: 6

@@ -1308,3 +1308,149 @@ class TestModelRefusal(unittest.TestCase):
         result = cw.build_course(ctx, {"topic": "t", "max_sections": 2})
         self.assertFalse(result["ok"])
         self.assertIn("did not answer", result["error"])
+
+
+# --------------------------------------------------------------------------
+# drafting at once, and repairing a depth instead of a section
+# --------------------------------------------------------------------------
+def _brief(index):
+    return {"title": f"S{index + 1}", "eyebrow": "e", "hook": "h", "teaches": f"thing {index + 1}"}
+
+
+def _plan(n):
+    return {"title": "P", "thesis": "t", "sections": [_brief(i) for i in range(n)]}
+
+
+def _depth(concrete=True):
+    blocks = [{"kind": "prose", "md": "mechanism " * 400}]
+    if concrete:
+        blocks.append({"kind": "steps", "items": ["a", "b", "c"]})
+    return {"blocks": blocks}
+
+
+def _section(index, figure=True, novice_concrete=True):
+    return {
+        "id": f"s{index + 1}", "title": f"S{index + 1}", "eyebrow": "e", "hook": "h",
+        "visual": {"type": "flow", "steps": ["a", "b", "c"]} if figure else None,
+        "levels": {"novice": _depth(novice_concrete), "intermediate": _depth(),
+                   "advanced": _depth()},
+        "exercise": ({"kind": "recall", "prompt": "q", "rubric": ["x"], "answer": "a"}
+                     if index % 2 else {"kind": "mcq", "prompt": "q",
+                                        "choices": ["a", "b", "c", "d"], "answer": 0,
+                                        "why": "w"}),
+    }
+
+
+class TestParallelDrafting(unittest.TestCase):
+    def test_sections_are_drafted_at_once_and_stay_in_plan_order(self):
+        class Llm(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.inflight = 0
+                self.peak = 0
+
+            async def acomplete_structured(self, **kw):
+                import asyncio
+                self.inflight += 1
+                self.peak = max(self.peak, self.inflight)
+                try:
+                    await asyncio.sleep(0.03)
+                    number = int(kw["purpose"].rsplit(".", 1)[1])
+                    return type("R", (), {"parsed": _section(number - 1), "text": ""})()
+                finally:
+                    self.inflight -= 1
+
+        llm = Llm()
+        ctx = FakeCtx(config={"draft_concurrency": 3}, llm=llm)
+        out = cw._draft_all(ctx, _plan(6), "en", 6, "")
+        self.assertEqual([s["title"] for s in out], [f"S{i + 1}" for i in range(6)])
+        self.assertEqual(llm.peak, 3, "three calls should be in flight, not one and not six")
+
+    def test_a_host_without_the_async_sibling_drafts_one_at_a_time(self):
+        class Llm(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.inflight = 0
+                self.peak = 0
+
+            def complete_structured(self, **kw):
+                import time
+                self.inflight += 1
+                self.peak = max(self.peak, self.inflight)
+                try:
+                    time.sleep(0.01)
+                    number = int(kw["purpose"].rsplit(".", 1)[1])
+                    return type("R", (), {"parsed": _section(number - 1), "text": ""})()
+                finally:
+                    self.inflight -= 1
+
+        llm = Llm()
+        out = cw._draft_all(FakeCtx(config={"draft_concurrency": 4}, llm=llm), _plan(4), "en", 4, "")
+        self.assertEqual(len(out), 4)
+        self.assertEqual(llm.peak, 1)
+
+    def test_the_concurrency_setting_is_clamped(self):
+        self.assertEqual(cw._draft_concurrency(FakeCtx(config={"draft_concurrency": 99})), 4)
+        self.assertEqual(cw._draft_concurrency(FakeCtx(config={"draft_concurrency": 0})), 1)
+        self.assertEqual(cw._draft_concurrency(FakeCtx(config={"draft_concurrency": 1})), 1)
+        self.assertEqual(cw._draft_concurrency(FakeCtx(config={})), 3)
+
+
+class TestLevelRepair(unittest.TestCase):
+    def test_a_failing_depth_is_repaired_without_redrafting_the_section(self):
+        calls = []
+
+        class Llm:
+            def complete_structured(self, **kw):
+                purpose = kw["purpose"]
+                calls.append(purpose)
+                if purpose.startswith("coursewright.repair."):
+                    return type("R", (), {"parsed": {"levels": {"novice": _depth()}}, "text": ""})()
+                return type("R", (), {"parsed": _section(0, novice_concrete=False), "text": ""})()
+
+        section = author.draft_section(FakeCtx(llm=Llm()), _plan(1), 0)
+        self.assertEqual(calls, ["coursewright.section.1", "coursewright.repair.1"])
+        self.assertTrue(any(b.get("kind") == "steps" for b in section["levels"]["novice"]["blocks"]))
+        self.assertEqual(author._section_problems_for(section, 0), [])
+
+    def test_the_repair_keeps_the_depths_it_did_not_touch(self):
+        class Llm:
+            def complete_structured(self, **kw):
+                if kw["purpose"].startswith("coursewright.repair."):
+                    return type("R", (), {"parsed": {"levels": {"novice": _depth()}}, "text": ""})()
+                return type("R", (), {"parsed": _section(0, novice_concrete=False), "text": ""})()
+
+        section = author.draft_section(FakeCtx(llm=Llm()), _plan(1), 0)
+        self.assertEqual(len(section["levels"]["advanced"]["blocks"]), 2)
+        self.assertEqual(section["visual"], {"type": "flow", "steps": ["a", "b", "c"]})
+
+    def test_a_problem_outside_the_depths_still_redrafts_the_whole_section(self):
+        calls = []
+
+        class Llm:
+            def complete_structured(self, **kw):
+                calls.append(kw["purpose"])
+                return type("R", (), {"parsed": _section(0, figure=False), "text": ""})()
+
+        author.draft_section(FakeCtx(llm=Llm()), _plan(1), 0)
+        self.assertEqual(calls, ["coursewright.section.1", "coursewright.section.1"])
+
+    def test_only_level_scoped_problems_allow_a_repair(self):
+        self.assertEqual(author._levels_named(["novice: no blocks"]), ["novice"])
+        self.assertEqual(author._levels_named(["novice: no blocks", "advanced: no blocks"]),
+                         ["novice", "advanced"])
+        self.assertEqual(author._levels_named(["novice: no blocks", "missing exercise"]), [])
+
+    def test_a_repair_that_returns_nothing_falls_back_to_a_redraft(self):
+        calls = []
+
+        class Llm:
+            def complete_structured(self, **kw):
+                calls.append(kw["purpose"])
+                if kw["purpose"].startswith("coursewright.repair."):
+                    return type("R", (), {"parsed": None, "text": "not json"})()
+                return type("R", (), {"parsed": _section(0, novice_concrete=False), "text": ""})()
+
+        author.draft_section(FakeCtx(llm=Llm()), _plan(1), 0)
+        self.assertEqual(calls, ["coursewright.section.1", "coursewright.repair.1",
+                                 "coursewright.section.1"])
