@@ -1,26 +1,28 @@
 # Catalog entry for the Hermes plugin catalog. Not submitted yet.
-# Shape mirrors ~/.hermes/hermes-agent/plugin-catalog/*.yaml.
+# Shape verified against hermes_cli/plugin_catalog.py `entry_from_mapping`:
+# sha is a full 40-hex commit, category comes from the fixed shelf list, version is quoted.
 name: coursewright
 repo: https://github.com/NehuenD/hermes_coursewright
-sha: 866217e
+sha: 54968a77b27655ff2bf6ab5744972b57cb67511a
 title: Coursewright
 description: >-
-  Turns a topic into one self-contained HTML course at three depths, novice, intermediate
-  and advanced, switched in place without a reload. It researches before it writes: it
-  searches through whatever web backend the host has configured, reads the pages it finds,
-  collects videos that carry captions, and lists every source, dead end and filtered result
-  in a footer. The model never writes HTML. It fills a validated spec and a renderer draws
-  the page, so a course looks designed rather than prompted. Exercises alternate between
-  multiple choice with instant local feedback and free recall with a rubric check that can
-  escalate to the agent for a grade. Depth, progress and answers persist per course. It
-  needs no API keys: when search returns nothing it falls back to Wikipedia, arXiv and
-  Stack Exchange, and a course with no sources says so on its own page.
+  Turns a topic into one self-contained HTML course at three depths, novice, intermediate and
+  advanced, switched in place without a reload. It researches before it writes: it searches
+  through whatever web backend the host has configured, reads the pages it finds, collects
+  videos that carry captions, and lists every source, dead end and filtered result in a footer.
+  The model never writes HTML; it fills a validated spec and a renderer draws the page. Figures
+  are drawn from the course's own outline — layered diagrams, sequence diagrams, small charts —
+  and every section ends with an exercise that answers back.
+  Disclosure — needs network access: the course is written by the host model through ctx.llm,
+  pages are read over the web with the host's own extractor or a configured scraper, and video
+  lookups run yt-dlp and youtube-transcript-api. It writes only its own plugin data directory
+  plus an optional copy under ~/Courses, and owns no credentials of its own.
 maintainer: NehuenD
 tier: community
-category: learning
-version: 0.4.4
-license: MIT
+category: tools
+requires_hermes: ">=0.23"
 docs_url: https://github.com/NehuenD/hermes_coursewright#readme
+version: "0.4.5"
 platforms: []
 capabilities:
   provides_tools:
@@ -31,16 +33,3 @@ capabilities:
   provides_hooks: []
   provides_middleware: []
   requires_env: []
-  provides_commands:
-    - course
-    - courses
-tags:
-  - learning
-  - courses
-  - research
-  - citations
-  - html
-notes: >-
-  Uses the host's web tools, web_search and web_extract, plus yt-dlp. Owns no credentials
-  and no network keys. Writes courses under its plugin data directory and mirrors them to
-  ~/Courses for easy opening.

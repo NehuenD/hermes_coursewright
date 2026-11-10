@@ -195,3 +195,30 @@ Current state, measured rather than assumed (`hermes plugins validate .`,
 3. Secret route for `FIRECRAWL_API_KEY` — the only admission-rule violation (rule 11).
 4. `post_message` probe — keeps the plugin portable to `plugins.isolation: host`.
 5. Tidy the entry file, then run `validate --install-deps` and open the PR.
+
+---
+
+## 8. Status after the conformance pass (2026-11-10, v0.4.5)
+
+All eight gaps above are closed. Evidence, re-run rather than assumed:
+
+| # | Fix | Verified by |
+|---|---|---|
+| 1 | `sha` is the full 40-hex commit `54968a77b27655ff2bf6ab5744972b57cb67511a` | `entry_from_mapping()` parses the entry |
+| 2 | `category: tools` | same parser: `category = tools` |
+| 3 | `httpx>=0.27,<1`, `Pillow>=10,<13`, `yt-dlp>=2024.12,<2027`, `youtube-transcript-api>=1.0,<2` | `plugins doctor` reports no dependency warnings |
+| 4 | `requires_hermes: ">=0.23"` in `plugin.yaml` and the entry | validate: "requires_hermes — spec '>=0.23' parses" |
+| 5 | `FIRECRAWL_API_KEY` read through `agent.secret_scope`, `env:` declared on the secret setting | two tests in `TestCredentials`; no `os.environ` credential read left |
+| 6 | `ctx.post_message` tolerates being refused or raising; falls back to `inject_message` | code path in the background build notifier |
+| 7 | `provides_commands` dropped from the entry | entry keys match the documented capability schema |
+| 8 | `license`, `notes`, `tags` removed; disclosures folded into `description` | entry parses clean |
+
+`hermes plugins validate . --install-deps` — the exact check catalog CI runs — passes:
+manifest, `requires_hermes`, config schema, loadability, capability probe, declared/registered
+tool parity, built-in collisions, security scan, `no core override`, and dependency resolution
+inside Hermes' core constraints.
+
+One advisory survives deliberately: `◇ Isolation — in-process only: ctx.post_message()`.
+`post_message` is refused under `plugins.isolation: host`; the plugin now degrades to an
+injected turn instead of failing, and the audit note stays as an honest statement that the
+notification path is in-process when the plugin is.
