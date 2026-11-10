@@ -33,6 +33,24 @@ def _s(value: Any, limit: int = 4000) -> str:
     return str(value)[:limit]
 
 
+def _label(value: Any, limit: int) -> str:
+    """One line of figure text: whitespace collapsed, cut between words, and marked with an
+    ellipsis. `_s` cannot do this because it also carries math and code, where the newlines are
+    the content.
+
+    A hard slice turned "real_2: corresponds to objective reality" into "real_2: corresponds to
+    obj" inside a box — it read as a corrupted value rather than a shortened one.
+    """
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    space = cut.rfind(" ")
+    if space > limit * 0.6:
+        cut = cut[:space]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
 def _list(value: Any) -> list:
     """A list, or [] — never a slice of a dict/str.
 
@@ -85,7 +103,7 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
         for raw_node in _list(spec.get("nodes"))[:8]:
             if not isinstance(raw_node, dict):
                 continue
-            label = _s(raw_node.get("label"), 26).strip()
+            label = _label(raw_node.get("label"), 48).strip()   # the renderer wraps, not clips
             if not label:
                 continue
             nid = re.sub(r"[^A-Za-z0-9_-]", "", _s(raw_node.get("id"), 20).strip())[:20]
@@ -105,7 +123,7 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
             dst = _s(raw_edge.get("to"), 20).strip()
             if src not in known or dst not in known:
                 continue      # a dangling edge is one typo, not a reason to lose the figure
-            edges.append({"from": src, "to": dst, "label": _s(raw_edge.get("label"), 26).strip()})
+            edges.append({"from": src, "to": dst, "label": _label(raw_edge.get("label"), 30).strip()})
         return {"type": "diagram", "nodes": nodes, "edges": edges,
                 "caption": _s(spec.get("caption"), 300)}
     if kind == "sequence":
@@ -126,7 +144,7 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
             if src not in actors or dst not in actors:
                 continue
             messages.append({"from": src, "to": dst,
-                             "label": _s(raw_message.get("label"), 32).strip(),
+                             "label": _label(raw_message.get("label"), 32).strip(),
                              "reply": bool(raw_message.get("reply"))})
         if not messages:
             warnings.append(f"{where}: dropped sequence figure with no message between its actors")

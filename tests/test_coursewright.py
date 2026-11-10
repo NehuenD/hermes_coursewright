@@ -881,7 +881,8 @@ class TestSvgFigures(unittest.TestCase):
 
     def _render(self, raw):
         clean, _ = self._figure(raw)
-        return render._figure(clean)
+        html, _width = render._figure(clean)
+        return html
 
     def test_a_diagram_draws_inline_svg(self):
         svg = self._render(dict(self.DIAGRAM))
@@ -912,6 +913,34 @@ class TestSvgFigures(unittest.TestCase):
         self.assertIn("&lt;script&gt;x", svg)
         self.assertIn("b &amp; c", svg)
         self.assertNotIn("<script>", svg)
+
+    def test_a_long_label_wraps_inside_its_box(self):
+        """A 170px clamp drew the text wider than the rectangle it belonged to."""
+        label = "real_2: corresponds to objective reality"
+        clean, _ = self._figure({"type": "diagram",
+                                 "nodes": [{"id": "a", "label": label},
+                                           {"id": "b", "label": "shadow"}],
+                                 "edges": [{"from": "a", "to": "b"}]})
+        geo = render._diagram_geometry(clean["nodes"], clean["edges"])
+        _x, _y, width, height = geo["boxes"]["a"]
+        lines = render._wrap_label(label)
+        self.assertGreater(len(lines), 1)                    # wrapped, not clamped
+        self.assertGreater(height, render._FIG_BOX_H)        # height grew instead
+        self.assertLessEqual(7.9 * max(len(line) for line in lines) + 4, width)
+
+        svg = self._render({"type": "diagram",
+                            "nodes": [{"id": "a", "label": label},
+                                      {"id": "b", "label": "shadow"}],
+                            "edges": [{"from": "a", "to": "b"}]})
+        self.assertEqual(svg.count("<tspan"), len(lines) + 1)   # +1: node b is a single line
+
+    def test_a_drawn_figure_is_centred_in_its_column(self):
+        """The SVG is `width:100%` with a `max-width`, so in a wide column it sat on the left."""
+        framed = render._framed_figure("<svg></svg>", 300.0, "fig")
+        self.assertIn('class="fig-frame"', framed)
+        self.assertIn("max-width:300px", framed)
+        loose = render._framed_figure("<div class=\"flow\"></div>", 0.0, "fig")
+        self.assertNotIn("fig-frame", loose)                 # DOM figures lay themselves out
 
     def test_the_same_spec_draws_the_same_picture(self):
         self.assertEqual(self._render(dict(self.DIAGRAM)), self._render(dict(self.DIAGRAM)))
@@ -1054,6 +1083,20 @@ class TestDevImportPath(unittest.TestCase):
         module._selfcheck()                      # would raise NameError('render')
         self.assertTrue(callable(module.make_plan))
         self.assertEqual(module._parse_course_args("x")["topic"], "x")
+
+
+class TestLabelText(unittest.TestCase):
+    def test_a_long_label_is_cut_between_words(self):
+        short = spec._label("real_2: corresponds to objective reality", 26)
+        self.assertTrue(short.endswith("…"))
+        self.assertTrue(short.startswith("real_2: corresponds"))
+        self.assertNotIn("obj…", short)                      # the old slice ended mid-word
+        self.assertLessEqual(len(short), 27)
+
+    def test_the_plain_slicer_still_carries_newlines(self):
+        """`_s` also carries math and code: collapsing whitespace there broke every math block."""
+        block = "Q = XW_Q\n\nK = XW_K"
+        self.assertEqual(spec._s(block, 400), block)
 
 
 if __name__ == "__main__":

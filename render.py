@@ -562,9 +562,10 @@ def _block(block: Dict[str, Any]) -> str:
         return f'<div class="codeblock">{label}<pre><code>{html.escape(block.get("code", ""))}</code></pre></div>'
     if kind == "figure":
         spec = block.get("spec") or {}
-        fig = _figure(spec)
+        fig, fig_w = _figure(spec)
         caption = _inline(block.get("caption", ""))
-        return f'<figure class="fig">{fig}{f"<figcaption>{caption}</figcaption>" if caption else ""}</figure>'
+        body = fig + (f"<figcaption>{caption}</figcaption>" if caption else "")
+        return _framed_figure(body, fig_w, "fig")
     return ""
 
 
@@ -580,7 +581,9 @@ def _block(block: Dict[str, Any]) -> str:
 _FIG_TEXT = 12.5            # node label size, px
 _FIG_EDGE_TEXT = 10.5       # edge label size, px
 _FIG_BOX_H = 38
-_FIG_ROW_GAP = 22           # between siblings inside one layer
+_FIG_ROW_GAP = 22
+_FIG_LABEL_CHARS = 24        # a label wraps at this many characters
+_FIG_LINE_H = 15.0           # ...and each extra line adds this much box height           # between siblings inside one layer
 _FIG_LAYER_GAP = 62         # between layers, before an edge label widens it
 
 
@@ -588,15 +591,44 @@ def _svg_text(value: Any) -> str:
     return html.escape(str(value or ""), quote=True)
 
 
-def _node_width(label: str) -> float:
-    """Wide enough for its own text, whatever else happens to the layout.
+def _wrap_label(label: str, limit: int = _FIG_LABEL_CHARS) -> List[str]:
+    """Break a label into lines a box can hold, on spaces where there are any."""
+    words = str(label).split()
+    if not words:
+        return [""]
+    lines: List[str] = []
+    line = ""
+    for word in words:
+        while len(word) > limit:              # one unbroken token: cut it, do not overflow
+            if line:
+                lines.append(line)
+                line = ""
+            lines.append(word[:limit])
+            word = word[limit:]
+        if not line:
+            line = word
+        elif len(line) + 1 + len(word) <= limit:
+            line += " " + word
+        else:
+            lines.append(line)
+            line = word
+    if line:
+        lines.append(line)
+    return lines
 
-    0.62em per glyph is the advance of a monospace face at the size labels are drawn at, so
-    7.9px per character at 12.5px leaves a margin; the clamps stop one long label from
-    stretching a whole column and a two-letter one from becoming a dot. A box narrower than
-    its label is how text ended up printed outside the diagram.
+
+def _node_size(label: str) -> tuple:
+    """A box that holds its own label: wrapped, so no clamp can leave text outside it.
+
+    0.62em per glyph is the advance of the monospace face the labels are set in — 7.9px per
+    character at 12.5px — and the wrap limit (24 characters) keeps the widest box near 207px,
+    which is inside every column this renderer draws. Height, not width, absorbs long labels.
     """
-    return max(64.0, min(170.0, 7.9 * len(label) + 16.0))
+    lines = _wrap_label(label)
+    widest = max(len(line) for line in lines) or 1
+    width = max(72.0, 7.9 * widest + 18.0)
+    height = _FIG_BOX_H + (len(lines) - 1) * _FIG_LINE_H
+    return width, height
 
 
 def _layered(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -668,7 +700,9 @@ def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
     keeps type at the size it was measured for, and vertical space is free on a page.
     """
     layer = _layered(nodes, edges)
-    widths = {node["id"]: _node_width(node["label"]) for node in nodes}
+    sizes = {node["id"]: _node_size(node["label"]) for node in nodes}
+    widths = {nid: dims[0] for nid, dims in sizes.items()}
+    heights = {nid: dims[1] for nid, dims in sizes.items()}
     groups: Dict[int, List[str]] = {}
     for node in nodes:                       # input order inside a layer: the model's own
         groups.setdefault(layer[node["id"]], []).append(node["id"])
@@ -698,28 +732,31 @@ def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
         for L in depths:
             columns[L] = (x, max(widths[i] for i in groups[L]))
             x += columns[L][1] + gap
-        tallest = max(len(groups[L]) for L in depths)
-        span = tallest * _FIG_BOX_H + (tallest - 1) * _FIG_ROW_GAP
+        span = max(sum(heights[i] for i in groups[L]) + (len(groups[L]) - 1) * _FIG_ROW_GAP
+                   for L in depths)
         for L in depths:
-            height = len(groups[L]) * _FIG_BOX_H + (len(groups[L]) - 1) * _FIG_ROW_GAP
+            height = sum(heights[i] for i in groups[L]) + (len(groups[L]) - 1) * _FIG_ROW_GAP
             top = pad + (span - height) / 2
-            for k, nid in enumerate(groups[L]):
-                boxes[nid] = (columns[L][0], top + k * (_FIG_BOX_H + _FIG_ROW_GAP),
-                              columns[L][1], _FIG_BOX_H)
+            for nid in groups[L]:
+                boxes[nid] = (columns[L][0], top, columns[L][1], heights[nid])
+                top += heights[nid] + _FIG_ROW_GAP
     else:
         gap = gap_y
         rows: Dict[int, float] = {}
+        row_h: Dict[int, float] = {}
         y = pad
         for L in depths:
             rows[L] = y
-            y += _FIG_BOX_H + gap
+            row_h[L] = max(heights[i] for i in groups[L])
+            y += row_h[L] + gap
         widest = max(sum(widths[i] for i in groups[L]) + (len(groups[L]) - 1) * _FIG_ROW_GAP
                      for L in depths)
         for L in depths:
             span = sum(widths[i] for i in groups[L]) + (len(groups[L]) - 1) * _FIG_ROW_GAP
             x = pad + (widest - span) / 2
             for nid in groups[L]:
-                boxes[nid] = (x, rows[L], widths[nid], _FIG_BOX_H)
+                boxes[nid] = (x, rows[L] + (row_h[L] - heights[nid]) / 2,
+                              widths[nid], heights[nid])
                 x += widths[nid] + _FIG_ROW_GAP
 
     # Labels stack inside a band: three edges leaving one node all want the same midpoint,
@@ -827,11 +864,15 @@ def _diagram_svg(spec: Dict[str, Any]) -> str:
             continue
         x, y, w, h = box
         cls = "nd on" if str(node.get("group") or "").strip() else "nd"
-        parts.append(f'<g><rect class="{cls}" x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" '
-                     f'height="{h}"/>'
-                     f'<text x="{x + w / 2:.1f}" y="{y + h / 2 + 4.4:.1f}" text-anchor="middle">'
-                     f'{_svg_text(node["label"])}'
-                     f'<title>{_svg_text(node["label"])}</title></text></g>')
+        lines = _wrap_label(node["label"])
+        top = y + h / 2 + 4.4 - (len(lines) - 1) * _FIG_LINE_H / 2
+        body = "".join(
+            f'<tspan x="{x + w / 2:.1f}" y="{top + i * _FIG_LINE_H:.1f}">{_svg_text(line)}</tspan>'
+            for i, line in enumerate(lines))
+        parts.append(f'<g><title>{_svg_text(node["label"])}</title>'
+                     f'<rect class="{cls}" x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" '
+                     f'height="{h:.1f}"/>'
+                     f'<text text-anchor="middle">{body}</text></g>')
     for edge in geo["edges"]:
         path = "M " + " L ".join(f"{px:.1f},{py:.1f}" for px, py in edge["points"])
         parts.append(f'<path class="ed" d="{path}"/>')
@@ -842,10 +883,11 @@ def _diagram_svg(spec: Dict[str, Any]) -> str:
         f'{_spoken_label(next((n["label"] for n in nodes if n["id"] == e["to"]), ""))}'
         for e in edges[:6]) or ", ".join(_spoken_label(n["label"]) for n in nodes)
     # allow a narrow figure to breathe up to 1.15x its natural width, and let a wide one shrink
-    return (f'<svg class="fig-svg" style="max-width:{geo["width"] * 1.15:.0f}px" '
+    width = geo["width"] * 1.15
+    return (f'<svg class="fig-svg" style="max-width:{width:.0f}px" '
             f'viewBox="0 0 {geo["width"]:.0f} {geo["height"]:.0f}" '
             f'role="img" aria-label="{html.escape("Diagram: " + spoken, quote=True)}">'
-            f'{"".join(parts)}</svg>')
+            f'{"".join(parts)}</svg>'), width
 
 
 def _sequence_svg(spec: Dict[str, Any]) -> str:
@@ -894,10 +936,11 @@ def _sequence_svg(spec: Dict[str, Any]) -> str:
             parts.append(_edge_label((x1 + x2) / 2, y - 7, text) if text else "")
         spoken.append(f'{_spoken_label(src)} to {_spoken_label(dst)}: {_spoken_label(text)}')
 
-    return (f'<svg class="fig-svg" style="max-width:{width * 1.15:.0f}px" '
+    framed = width * 1.15
+    return (f'<svg class="fig-svg" style="max-width:{framed:.0f}px" '
             f'viewBox="0 0 {width:.0f} {bottom + pad:.0f}" '
             f'role="img" aria-label="{html.escape("Sequence: " + "; ".join(spoken[:8]), quote=True)}">'
-            f'{"".join(parts)}</svg>')
+            f'{"".join(parts)}</svg>'), framed
 
 
 def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]:
@@ -945,8 +988,9 @@ def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]
                 "groupIds": [], "frameId": None, "roundness": {"type": 3},
                 "seed": len(elements) * 7 + 3, "version": 1, "versionNonce": 1,
                 "isDeleted": False, "boundElements": [{"type": "text", "id": tid}]})
-            elements.append(text_el(tid, node["label"], x + 2, y + h / 2 - 9,
-                                    max(10.0, w - 4), 18, 13, container=rid))
+            lines = _wrap_label(node["label"])
+            elements.append(text_el(tid, "\n".join(lines), x + 2, y + 2,
+                                    max(10.0, w - 4), max(18.0, h - 4), 13, container=rid))
         for j, edge in enumerate(geo["edges"]):
             origin_x, origin_y = edge["points"][0]
             points = [[round(px - origin_x, 2), round(py - origin_y, 2)]
@@ -1022,7 +1066,19 @@ def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]
             "elements": elements, "appState": {"viewBackgroundColor": "#ffffff"}, "files": {}}
 
 
-def _figure(spec: Dict[str, Any]) -> str:
+def _framed_figure(body: str, width: float, classes: str) -> str:
+    """A figure that is exactly as wide as its own drawing, centred in whatever column it lands
+    in. Without the frame a diagram sits at the left edge of a full-bleed row, a hundred pixels
+    away from the caption printed under it."""
+    if width:
+        return (f'<figure class="{classes}">'
+                f'<div class="fig-frame" style="max-width:{width:.0f}px">{body}</div>'
+                f'</figure>')
+    return f'<figure class="{classes}">{body}</figure>'
+
+
+def _figure(spec: Dict[str, Any]) -> tuple:
+    """The figure, and the width it wants. `0.0` means it lays itself out."""
     kind = str(spec.get("type") or "").strip().lower()
     if kind == "diagram":
         return _diagram_svg(spec)
@@ -1034,7 +1090,7 @@ def _figure(spec: Dict[str, Any]) -> str:
         steps = [str(s).strip() for s in raw_steps][:7]
         steps = [s for s in steps if s]
         if len(steps) < 2:
-            return ""
+            return "", 0.0
         parts = "".join(
             f'<span class="flow-step"><span class="flow-n">{i + 1}</span>'
             f'<span class="flow-t">{_inline(step)}</span></span>'
@@ -1042,11 +1098,11 @@ def _figure(spec: Dict[str, Any]) -> str:
         cols = len(steps) if len(steps) <= 4 else 3
         spoken = html.escape(" then ".join(_spoken_label(s) for s in steps), quote=True)
         return (f'<div class="flow" style="--cols:{cols}" role="img" '
-                f'aria-label="{spoken}">{parts}</div>')
+                f'aria-label="{spoken}">{parts}</div>', 0.0)
     if kind == "trajectory":
         n = spec.get("n") if isinstance(spec.get("n"), int) else 27
         return (f'<canvas class="plot" data-plot="trajectory" data-n="{max(3, min(int(n), 97))}"'
-                f' role="img" aria-label="Trajectory of {n}"></canvas>')
+                f' role="img" aria-label="Trajectory of {n}"></canvas>', 0.0)
     if kind in {"bars", "line"}:
         points = []
         raw_points = spec.get("points")
@@ -1059,14 +1115,14 @@ def _figure(spec: Dict[str, Any]) -> str:
                 continue
             points.append({"label": str(raw.get("label") or "")[:18], "value": float(value)})
         if len(points) < 2:
-            return ""
+            return "", 0.0
         payload = html.escape(json.dumps(points, ensure_ascii=False), quote=True)
         xlabel = html.escape(str(spec.get("xlabel") or "")[:28], quote=True)
         ylabel = html.escape(str(spec.get("ylabel") or "")[:28], quote=True)
         label = html.escape(f"{kind} chart: {ylabel or 'values'} by {xlabel or 'item'}", quote=True)
         return (f'<canvas class="plot" data-plot="{kind}" data-points="{payload}" '
-                f'data-x="{xlabel}" data-y="{ylabel}" role="img" aria-label="{label}"></canvas>')
-    return ""
+                f'data-x="{xlabel}" data-y="{ylabel}" role="img" aria-label="{label}"></canvas>', 0.0)
+    return "", 0.0
 
 
 # --------------------------------------------------------------------------
@@ -1120,11 +1176,12 @@ def _section(section: Dict[str, Any], index: int) -> str:
         for level in ("novice", "intermediate", "advanced"))
     visual = ""
     if section.get("visual"):
-        visual = _figure(section["visual"])
-        if visual:
+        visual_html, fig_w = _figure(section["visual"])
+        if visual_html:
             caption = _inline(str(section["visual"].get("caption") or ""))
-            visual = ('<figure class="fig fig-lead">' + visual
-                      + (f"<figcaption>{caption}</figcaption>" if caption else "") + "</figure>")
+            visual = _framed_figure(
+                visual_html + (f"<figcaption>{caption}</figcaption>" if caption else ""),
+                fig_w, "fig fig-lead")
     hook = f'<p class="hook">{_inline(section["hook"])}</p>' if section.get("hook") else ""
     eyebrow = (f'<span class="sec-eyebrow"><span class="sec-num">{index:02d}</span>'
                f'{" · " + _inline(section["eyebrow"]) if section.get("eyebrow") else ""}</span>')
@@ -1533,6 +1590,7 @@ figure.fig{margin:2rem 0}
 /* an SVG figure belongs to the page: it inherits the palette, so light, dark and print all
    work from one drawing instead of a baked image that only matches one theme */
 .fig-svg{width:100%;height:auto;display:block;overflow:visible;font-family:var(--mono)}
+.fig-frame{width:100%;margin-inline:auto}
 .fig-svg text{fill:var(--ink);font-size:12.5px;font-family:var(--mono)}
 .fig-svg .nd{fill:var(--surface);stroke:var(--line);stroke-width:1.3}
 .fig-svg .nd.on{stroke:var(--accent);stroke-width:1.8}
