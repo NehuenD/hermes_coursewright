@@ -6,8 +6,8 @@ repo: https://github.com/NehuenD/hermes_coursewright
 sha: 54968a77b27655ff2bf6ab5744972b57cb67511a
 title: Coursewright
 description: >-
-  Turns a topic into one self-contained HTML course at three depths, novice, intermediate and
-  advanced, switched in place without a reload. It researches before it writes: it searches
+  `/course <topic>` turns a subject into one self-contained HTML course at three depths, novice,
+  intermediate and advanced, switched in place without a reload. It researches before it writes: it searches
   through whatever web backend the host has configured, reads the pages it finds, collects
   videos that carry captions, and lists every source, dead end and filtered result in a footer.
   The model never writes HTML; it fills a validated spec and a renderer draws the page. Figures
