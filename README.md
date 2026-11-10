@@ -125,9 +125,9 @@ leaflet — and every level walks at least one example through its actual values
 ### Debugging a build
 
 `COURSEWRIGHT_DUMP=<dir>` writes each section's raw model reply, and the version it was coerced
-into, under that directory. It is off unless you set it yourself, it is the only place the
-plugin writes outside its own data directory, and it only ever contains prompts and model
-output — the same text the course is built from. Use it when a section comes out wrong and you
+into, under that directory. It is off unless you set it yourself; apart from the course copy
+under `courses_dir`, it is the only place the plugin writes outside its own data directory; and
+it only ever contains prompts and model output — the same text the course is built from. Use it when a section comes out wrong and you
 want to see what the model actually said.
 
 ## What it needs from the host
@@ -147,6 +147,30 @@ The plugin is written to run on someone else's Hermes, so it probes instead of a
 `search`, `readers`, `firecrawl`, `videos`, `transcripts`, `thumbnails` and `surface` are
 what `coursewright_status` reports under `environment`. Two builds of one course cannot run
 at once, across processes as well as threads.
+
+## What it does on your machine
+
+The whole list, because a plugin that reads the web and runs a tool should say so:
+
+- **Network.** Search queries go to the host's search backend. Pages it finds are fetched over
+  HTTP (Wikipedia, arXiv and Stack Exchange directly when no backend answers). `yt-dlp` is
+  queried for video metadata, and thumbnails are downloaded and inlined into the page as WebP so
+  a course has no external image requests. If you configure a scraper (`firecrawl_url`), pages
+  are sent to it.
+- **Reads.** Only the pages research found, plus its own files. It does not read your home
+  directory, other plugins' data, `.env`, `auth.json` or any credential store.
+- **Shell.** One child process: `yt-dlp`, invoked with an argument vector (never a shell), only
+  while collecting a watch list, and skipped entirely when `enable_videos` is false.
+- **Writes.** Its own directory under `$HERMES_HOME/plugin-data/coursewright/`, and one copy of
+  the finished page under `courses_dir` (`~/Courses` by default — point it elsewhere, or set it
+  empty to disable the copy). `COURSEWRIGHT_DUMP` is the only other destination, and only when
+  you set it.
+- **Long-running.** A course takes minutes: one model call per section, plus research. Run it in
+  the background (`background: true`, or `/course`) and it keeps going after the tool returns,
+  then posts the finished course into the chat. Nothing is left running after a build ends.
+- **Credentials.** None of its own. The optional scraper key is a `secret` config key, stored
+  and read through Hermes' secret scope; the model calls use the host's own provider.
+- **Telemetry.** None.
 
 ## Reading a course
 
