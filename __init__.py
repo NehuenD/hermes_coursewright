@@ -197,6 +197,24 @@ def _build_slot(slug: str):
             handle.close()
 
 
+def _secret(name: str) -> str:
+    """A credential, read the way Hermes requires: through the profile-aware secret scope.
+
+    A bare `os.environ` read is what the catalog's credential rule forbids — under
+    multiplexing it can hand back another profile's key. The import is guarded because this
+    module also runs under the test harness, where `agent` is not on the path.
+    """
+    try:
+        from agent.secret_scope import get_secret
+    except Exception:                       # no host scope (tests, standalone import)
+        return ""
+    try:
+        return str(get_secret(name, "") or "").strip()
+    except Exception as exc:                # an unscoped read fails closed by design
+        logger.warning("coursewright: %s unavailable: %s", name, exc)
+        return ""
+
+
 def _caps(ctx, *, want_research: bool = True, want_videos: bool = True) -> dict:
     """Research settings, including which scraper to use, as research.gather expects them."""
     def _setting(key, default):
@@ -206,7 +224,7 @@ def _caps(ctx, *, want_research: bool = True, want_videos: bool = True) -> dict:
             return default
         return default if value is None else value
 
-    key = str(_setting("firecrawl_key", "") or "").strip() or os.environ.get("FIRECRAWL_API_KEY", "")
+    key = str(_setting("firecrawl_key", "") or "").strip() or _secret("FIRECRAWL_API_KEY")
     timeout = _as_int(_setting("research_timeout", 150)) or 150
     return {
         "max_sources": _as_int(_setting("max_sources", 12)) if want_research else 0,
@@ -468,13 +486,21 @@ def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "")
             with _BUILD_LOCK:
                 _ACTIVE.pop(key, None)
             _release_build(guard)
-        # Post first: it appends the message without pretending to be user input.
-        handle = ctx.post_message(message)
-        if getattr(handle, "ok", False):
+        # Post first: it appends the message without pretending to be user input. Under
+        # `plugins.isolation: host` the call is refused outright rather than returning a bad
+        # handle, so the fallback has to cover a raise as well as a refusal.
+        handle = None
+        try:
+            handle = ctx.post_message(message)
+        except Exception as exc:
+            logger.warning("coursewright: post unavailable (%s) for %r; injecting instead",
+                           exc, topic)
+        if handle is not None and getattr(handle, "ok", False):
             logger.info("coursewright: posted build result for %r", topic)
             return
-        logger.warning("coursewright: post refused (%s) for %r; injecting instead",
-                       getattr(handle, "error", "unknown"), topic)
+        if handle is not None:
+            logger.warning("coursewright: post refused (%s) for %r; injecting instead",
+                           getattr(handle, "error", "unknown"), topic)
         try:  # a refused post still has to reach the user somehow
             ctx.inject_message(message, role="user", session_key=session_key)
         except Exception as exc:

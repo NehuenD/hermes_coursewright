@@ -1,6 +1,7 @@
 name: coursewright
-version: 0.4.4
+version: 0.4.5
 manifest_version: 2
+requires_hermes: ">=0.23"   # ctx.inject_message, ctx.state, manifest v2
 license: MIT
 description: >-
   Generates a self-contained, interactive HTML course on any subject at three
@@ -22,10 +23,12 @@ requires_env: []
 # search, transcript badges and thumbnails. Every one of them degrades to
 # "feature off, and the course says so" rather than a crash.
 python_dependencies:
-  - httpx
-  - Pillow
-  - yt-dlp
-  - youtube-transcript-api
+  # floors are the oldest release with the API we use, bounds keep a major bump from
+  # changing behaviour underneath a user (the catalog dependency policy asks for both)
+  - "httpx>=0.27,<1"
+  - "Pillow>=10,<13"
+  - "yt-dlp>=2024.12,<2027"
+  - "youtube-transcript-api>=1.0,<2"
 config_schema:
   default_level:
     type: str
@@ -66,8 +69,9 @@ config_schema:
   firecrawl_key:
     type: secret
     default: ""
+    env: FIRECRAWL_API_KEY
     label: Scraper API key
-    description: Sent as a Bearer token to the scraper above. Empty falls back to FIRECRAWL_API_KEY.
+    description: Sent as a Bearer token to the scraper above, read through Hermes' secret store.
   research_timeout:
     type: int
     default: 150

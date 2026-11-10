@@ -1102,6 +1102,33 @@ class TestDevImportPath(unittest.TestCase):
         self.assertEqual(module._parse_course_args("x")["topic"], "x")
 
 
+class TestCredentials(unittest.TestCase):
+    def test_the_scraper_key_comes_through_the_secret_scope(self):
+        """`os.environ` reads are what the catalog credential rule forbids: they leak across
+        profiles. The key must resolve through `agent.secret_scope`, and only as a fallback to
+        an unset setting."""
+        seen = []
+        original = cw._secret
+        cw._secret = lambda name: seen.append(name) or "k-123"
+        try:
+            caps = cw._caps(FakeCtx(config={}))
+        finally:
+            cw._secret = original
+        self.assertEqual(caps["firecrawl_key"], "k-123")
+        self.assertEqual(seen, ["FIRECRAWL_API_KEY"])
+
+    def test_a_configured_key_wins_over_the_scope(self):
+        seen = []
+        original = cw._secret
+        cw._secret = lambda name: seen.append(name) or "from-scope"
+        try:
+            caps = cw._caps(FakeCtx(config={"firecrawl_key": "from-settings"}))
+        finally:
+            cw._secret = original
+        self.assertEqual(caps["firecrawl_key"], "from-settings")
+        self.assertEqual(seen, [])
+
+
 class TestLabelText(unittest.TestCase):
     def test_a_long_label_is_cut_between_words(self):
         short = spec._label("real_2: corresponds to objective reality", 26)
