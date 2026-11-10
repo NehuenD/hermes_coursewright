@@ -3,7 +3,7 @@
 # sha is a full 40-hex commit, category comes from the fixed shelf list, version is quoted.
 name: coursewright
 repo: https://github.com/NehuenD/hermes_coursewright
-sha: 2333cbb165db851e6ffab099a6197fe7197a9ee4
+sha: ded7cbdfe1a376fccd60257ecbaed116fbcdf040
 title: Coursewright
 description: >-
   `/course <topic>` turns a subject into one self-contained HTML course at three depths, novice,
@@ -22,7 +22,7 @@ tier: community
 category: tools
 requires_hermes: ">=0.23"
 docs_url: https://github.com/NehuenD/hermes_coursewright#readme
-version: "0.4.5"
+version: "0.4.6"
 platforms: []
 screenshots:
   - https://raw.githubusercontent.com/NehuenD/hermes_coursewright/2333cbb165db851e6ffab099a6197fe7197a9ee4/docs/screenshots/cover-graphite.png
