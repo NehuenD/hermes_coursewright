@@ -746,6 +746,9 @@ def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
         if text:
             seen_in_band[band] = ordinal + 1
         slot = ordinal if text else 0
+        # outside-the-figure channels carry their own x, but two channels six pixels apart
+        # still print on top of each other: stagger the label along the run as well
+        spread = (slot - (bands.get(band, 1) - 1) / 2) * 16
         jump = abs(layer[dst] - layer[src])
 
         if src == dst:                                    # a state that stays put
@@ -789,14 +792,14 @@ def _diagram_geometry(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
             routed.append({"points": [(bx, sy + sh), (bx, yb), (tx_mid, yb),
                                       (tx_mid, ty + th + 7)],
                            "head": (tx_mid, ty + th, 0, -1),
-                           "label": ((bx + tx_mid) / 2, yb + 2), "text": text})
+                           "label": ((bx + tx_mid) / 2, yb + 2 + spread), "text": text})
         else:
             xr = max(x + w for x, _, w, _ in boxes.values()) + 20 + channel * 12
             y1 = sy + sh / 2
             y2 = ty + th / 2
             routed.append({"points": [(sx + sw, y1), (xr, y1), (xr, y2), (tx + tw + 7, y2)],
                            "head": (tx + tw, y2, 1, 0),
-                           "label": (xr + text_w / 2 + 6, (y1 + y2) / 2), "text": text})
+                           "label": (xr + text_w / 2 + 6, (y1 + y2) / 2 + spread), "text": text})
 
     label_w_max = {item["text"]: 0.62 * _FIG_EDGE_TEXT * len(item["text"]) + 10
                    for item in routed if item["text"]}

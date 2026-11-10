@@ -58,9 +58,12 @@ PALETTES: Dict[str, Dict[str, Dict[str, str]]] = {
 # --------------------------------------------------------------------------
 # Type pairings — system-safe stacks only, no web fonts, no network.
 # --------------------------------------------------------------------------
-_SERIF = ('ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", '
-          '"Hoefler Text", Charter, Georgia, "DejaVu Serif", serif')
-_SANS = ('ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, '
+# A named face first, then the platform's own idea of "serif": a page that ships no web fonts
+# renders in whatever the reader has, and the difference between Source Serif and the
+# fallback is most of why one page looks designed and the other looks defaulted.
+_SERIF = ('"Source Serif 4", ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, '
+          '"Book Antiqua", "Hoefler Text", Charter, Georgia, "DejaVu Serif", serif')
+_SANS = ('"Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, '
          '"Helvetica Neue", "DejaVu Sans", Arial, sans-serif')
 _MONO = ('ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, '
          '"DejaVu Sans Mono", monospace')
