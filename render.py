@@ -2008,8 +2008,18 @@ _JS = """
         }
         g.fillStyle=muted;
         var first=pts[0].label||'',last=pts[pts.length-1].label||'';
-        if(first)g.fillText(first.slice(0,14),pad.l,h-6);
-        if(last){var lw=g.measureText(last.slice(0,14)).width;g.fillText(last.slice(0,14),w-pad.r-lw,h-6)}
+        if(pts.length<=6){
+          /* every category is named when there is room: two labels on a three-bar chart
+             leaves the middle bar anonymous, which reads as a missing value */
+          pts.forEach(function(p,i){
+            var lab=(p.label||'').slice(0,14); if(!lab)return;
+            var lw=g.measureText(lab).width;
+            g.fillText(lab,Math.min(Math.max(X(i)-lw/2,pad.l),w-pad.r-lw),h-6);
+          });
+        }else{
+          if(first)g.fillText(first.slice(0,14),pad.l,h-6);
+          if(last){var lw=g.measureText(last.slice(0,14)).width;g.fillText(last.slice(0,14),w-pad.r-lw,h-6)}
+        }
         var mv=hi.toLocaleString();
         g.fillText(mv,Math.min(Math.max(X(maxIdx)-8,pad.l+2),w-pad.r-g.measureText(mv).width),Math.max(pad.t+16,Y(hi)-6));
       }

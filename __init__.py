@@ -238,6 +238,112 @@ def _guess_language(topic: str, explicit: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# identity rotation
+# --------------------------------------------------------------------------
+# Six palettes and five type pairings only make a varied set if each build knows what the
+# others spent. Two builds planning at the same moment read the same inventory and pick the
+# same combination, so the choice is claimed on disk under a lock before the model is asked:
+# a concurrent plan then sees the claim and takes the next free combination.
+_IDENTITY_CLAIM_TTL = 45 * 60.0
+
+
+def _identity_claim_dir() -> Path:
+    return _store() / "state" / "identity-claims"
+
+
+@contextlib.contextmanager
+def _identity_slot():
+    """One writer at a time. Timing out is better than refusing to plan at all."""
+    import fcntl
+
+    handle = None
+    held = False
+    try:
+        folder = _store() / "state"
+        folder.mkdir(parents=True, exist_ok=True)
+        handle = open(folder / "identity.lock", "a+")
+    except OSError:
+        yield
+        return
+    try:
+        deadline = time.time() + 60.0
+        while time.time() < deadline:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except OSError:
+                time.sleep(0.2)
+        if not held:
+            logger.warning("coursewright: identity lock busy; assigning without it")
+        yield
+    finally:
+        try:
+            if held:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _identity_history() -> List[dict]:
+    """Every identity already spent: built courses, saved plans, and live claims.
+
+    Plans count because a plan is written before its course exists; claims count because
+    nothing is on disk yet while the model writes that plan.
+    """
+    inventory = _inventory()
+    rows = [row["identity"] for row in inventory
+            if isinstance(row.get("identity"), dict) and row["identity"].get("palette")]
+    taken = {row.get("slug") for row in inventory}
+    try:
+        plans = sorted((_store() / "plans").glob("*.json"),
+                       key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        plans = []
+    for path in plans:
+        if path.stem in taken:
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        identity = document.get("identity")
+        if isinstance(identity, dict) and identity.get("palette"):
+            rows.append(identity)
+    try:
+        claims = sorted(_identity_claim_dir().glob("*.json"),
+                        key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        claims = []
+    for path in claims:
+        try:
+            if time.time() - path.stat().st_mtime > _IDENTITY_CLAIM_TTL:
+                path.unlink(missing_ok=True)      # a crashed plan should not colour later ones
+                continue
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        identity = document.get("identity")
+        if isinstance(identity, dict) and identity.get("palette"):
+            rows.append(identity)
+    return rows
+
+
+def _claim_identity() -> dict:
+    """Pick the least-used combination and write the claim before the long model call."""
+    with _identity_slot():
+        identity = tokenmod.assign(_identity_history())
+        try:
+            folder = _identity_claim_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            name = f"{os.getpid()}-{int(time.time() * 1000)}-{threading.get_ident()}.json"
+            _write(folder / name, json.dumps({"identity": identity, "at": _now()}))
+        except OSError as exc:
+            logger.warning("coursewright: could not record the identity claim: %s", exc)
+    return identity
+
+
+# --------------------------------------------------------------------------
 # plan
 # --------------------------------------------------------------------------
 def _topic_key(topic: str) -> str:
@@ -289,8 +395,7 @@ def make_plan(ctx, args: dict) -> dict:
                                   # put two contradictory instructions in the same prompt.
                                   avoid_identity=None,
                                   sections=_as_int(args.get("max_sections")),
-                                  forced_identity=tokenmod.assign(
-                                      [row["identity"] for row in _inventory() if row.get("identity")]))
+                                  forced_identity=_claim_identity())
     except author.ModelUnavailable as exc:
         return {"ok": False,
                 "error": (f"the host would not run the model ({exc}). A course needs model access: "

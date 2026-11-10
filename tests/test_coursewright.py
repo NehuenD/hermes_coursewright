@@ -364,6 +364,18 @@ class TestBuild(StoreCase):
         mirrored = self.root / "mirror" / result["slug"] / "figures" / "s1.excalidraw"
         self.assertEqual(mirrored.read_text(), stored.read_text())
 
+    def test_two_plans_at_once_do_not_take_the_same_identity(self):
+        """Two builds planning together read the same inventory; the claim breaks the tie."""
+        first = cw._claim_identity()
+        second = cw._claim_identity()
+        self.assertNotEqual((first["palette"], first["type_pairing"]),
+                            (second["palette"], second["type_pairing"]))
+        self.assertTrue(cw._identity_history())          # the claims are in the history
+
+    def test_a_claim_that_never_became_a_course_still_counts(self):
+        cw._claim_identity()
+        self.assertEqual(len(cw._identity_history()), 1)
+
     def test_videos_survive_research_off(self):
         """enable_videos on its own must still collect a watch list.
 
