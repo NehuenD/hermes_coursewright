@@ -5,6 +5,22 @@ at three depths, novices first, and switches between them in place without a rel
 course has figures, exercises with feedback, recommended videos and reading, and a footer
 that lists every source it read.
 
+## What it looks like
+
+Four courses, each given its own visual identity by the rotation — same renderer, different
+palette, type pairing and layout:
+
+| | |
+|---|---|
+| ![graphite](docs/screenshots/cover-graphite.png) | ![sea glass](docs/screenshots/cover-seaglass.png) |
+| ![carbon gold](docs/screenshots/cover-carbon-gold.png) | ![risograph](docs/screenshots/cover-risograph.png) |
+
+Figures are drawn from the section's own outline — a sequence diagram for a mechanism, a chart
+when the numbers are the point:
+
+![a sequence diagram](docs/screenshots/figure-sequence.png)
+![a chart](docs/screenshots/figure-chart.png)
+
 ## Install
 
 ```bash
