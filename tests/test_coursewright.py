@@ -934,6 +934,23 @@ class TestSvgFigures(unittest.TestCase):
                             "edges": [{"from": "a", "to": "b"}]})
         self.assertEqual(svg.count("<tspan"), len(lines) + 1)   # +1: node b is a single line
 
+    def test_a_long_actor_name_widens_its_box(self):
+        """A fixed 120px actor box printed "RNA polymerase II" through its own wall."""
+        actors = ["RNA polymerase II", "transcription factor TFIIH"]
+        svg = self._render({"type": "sequence", "actors": actors,
+                            "messages": [{"from": actors[0], "to": actors[1], "label": "binds"}]})
+        from xml.etree import ElementTree
+        tree = ElementTree.fromstring(svg)
+        rects = [r for r in tree.iter() if r.get("class") == "nd"]
+        # actor labels first, then the message label between the lifelines
+        labels = ["".join(t.itertext()).strip() for t in tree.iter() if t.tag == "text"][:2]
+        self.assertEqual(len(rects), 2)
+        self.assertEqual(len(labels), 2)
+        for rect, label in zip(rects, labels):
+            width = float(str(rect.get("width") or 0))
+            self.assertGreaterEqual(width, 7.9 * len(label) + 8)
+        self.assertEqual(labels[1], actors[1])               # the name survives unclipped
+
     def test_a_drawn_figure_is_centred_in_its_column(self):
         """The SVG is `width:100%` with a `max-width`, so in a wide column it sat on the left."""
         framed = render._framed_figure("<svg></svg>", 300.0, "fig")

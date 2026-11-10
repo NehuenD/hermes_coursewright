@@ -129,7 +129,7 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
     if kind == "sequence":
         actors: List[str] = []
         for raw_actor in _list(spec.get("actors"))[:5]:
-            name = _s(raw_actor, 22).strip()
+            name = _label(raw_actor, 32).strip()   # the box grows to fit the name
             if name and name not in actors:
                 actors.append(name)
         if len(actors) < 2:
@@ -139,8 +139,10 @@ def _figure_spec(spec: Dict[str, Any], where: str, warnings: List[str]) -> Dict[
         for raw_message in _list(spec.get("messages"))[:8]:
             if not isinstance(raw_message, dict):
                 continue
-            src = _s(raw_message.get("from"), 22).strip()
-            dst = _s(raw_message.get("to"), 22).strip()
+            # the same limit as the actor names, or a long actor is valid at 32 characters
+            # where the message refers to it and unmatched at 22, which drops the whole figure
+            src = _label(raw_message.get("from"), 32).strip()
+            dst = _label(raw_message.get("to"), 32).strip()
             if src not in actors or dst not in actors:
                 continue
             messages.append({"from": src, "to": dst,

@@ -890,16 +890,27 @@ def _diagram_svg(spec: Dict[str, Any]) -> str:
             f'{"".join(parts)}</svg>'), width
 
 
+def _sequence_grid(actors: List[str]) -> Dict[str, Any]:
+    """Columns for a sequence. The actor box is as wide as its longest name, not a fixed 120px:
+    a fixed box printed "RNA polymerase II" through the wall of its own rectangle."""
+    head_w = max(120.0, 7.9 * max(len(actor) for actor in actors) + 24.0)
+    col = head_w + 30.0
+    pad = 16.0
+    head_h = 32.0
+    x_of = {actor: pad + i * col for i, actor in enumerate(actors)}
+    width = pad * 2 + (len(actors) - 1) * col + head_w
+    return {"head_w": head_w, "col": col, "pad": pad, "head_h": head_h,
+            "x_of": x_of, "width": width}
+
+
 def _sequence_svg(spec: Dict[str, Any]) -> str:
     actors = [str(a) for a in (spec.get("actors") or []) if str(a).strip()]
     messages = [m for m in (spec.get("messages") or []) if isinstance(m, dict)]
     if len(actors) < 2 or not messages:
         return ""
-    col = 150.0
-    pad = 16.0
-    head_h = 32.0
-    x_of = {actor: pad + i * col for i, actor in enumerate(actors)}
-    width = pad * 2 + (len(actors) - 1) * col + 120
+    grid = _sequence_grid(actors)
+    pad, head_h, x_of, width = grid["pad"], grid["head_h"], grid["x_of"], grid["width"]
+    head_w, mid = grid["head_w"], grid["head_w"] / 2
     top = pad
     first_msg = top + head_h + 34
     step = 42.0
@@ -908,11 +919,12 @@ def _sequence_svg(spec: Dict[str, Any]) -> str:
     parts = []
     for actor in actors:
         x = x_of[actor]
-        parts.append(f'<rect class="nd" x="{x:.1f}" y="{top:.1f}" width="120" height="{head_h}"/>'
-                     f'<text x="{x + 60:.1f}" y="{top + head_h / 2 + 4.4:.1f}" text-anchor="middle">'
+        parts.append(f'<rect class="nd" x="{x:.1f}" y="{top:.1f}" width="{head_w:.1f}" '
+                     f'height="{head_h:.1f}"/>'
+                     f'<text x="{x + mid:.1f}" y="{top + head_h / 2 + 4.4:.1f}" text-anchor="middle">'
                      f'{_svg_text(actor)}</text>')
-        parts.append(f'<line class="ll" x1="{x + 60:.1f}" y1="{top + head_h:.1f}" '
-                     f'x2="{x + 60:.1f}" y2="{bottom:.1f}"/>')
+        parts.append(f'<line class="ll" x1="{x + mid:.1f}" y1="{top + head_h:.1f}" '
+                     f'x2="{x + mid:.1f}" y2="{bottom:.1f}"/>')
 
     spoken = []
     for i, message in enumerate(messages):
@@ -923,13 +935,13 @@ def _sequence_svg(spec: Dict[str, Any]) -> str:
         text = str(message.get("label") or "")
         lane = "ed reply" if message.get("reply") else "ed"
         if src == dst:                                  # a call that returns to itself
-            x = x_of[src] + 60
+            x = x_of[src] + mid
             parts.append(f'<path class="{lane}" d="M {x:.1f},{y - 8:.1f} h 34 v 20 h -34"/>')
             parts.append(_arrow(x + 7, y + 12, -1, 0))
             parts.append(_edge_label(x + 44, y - 6, text) if text else "")
         else:
-            x1 = x_of[src] + 60
-            x2 = x_of[dst] + 60
+            x1 = x_of[src] + mid
+            x2 = x_of[dst] + mid
             direction = 1 if x2 > x1 else -1
             parts.append(f'<path class="{lane}" d="M {x1:.1f},{y:.1f} H {x2 - 8 * direction:.1f}"/>')
             parts.append(_arrow(x2, y, direction, 0))
@@ -1014,23 +1026,24 @@ def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]
         messages = [m for m in (spec.get("messages") or []) if isinstance(m, dict)]
         if len(actors) < 2 or not messages:
             return {}
-        col, pad, head = 150.0, 16.0, 32.0
-        x_of = {actor: pad + i * col for i, actor in enumerate(actors)}
+        grid = _sequence_grid(actors)
+        pad, head, x_of = grid["pad"], grid["head_h"], grid["x_of"]
+        head_w = grid["head_w"]
         bottom = pad + head + 34 + max(0, len(messages) - 1) * 42 + 26
         for actor in actors:
             x = x_of[actor]
             rid, tid = f"fig-{actor}", f"fig-{actor}-label"
             elements.append({
-                "type": "rectangle", "id": rid, "x": x, "y": pad, "width": 120, "height": head,
+                "type": "rectangle", "id": rid, "x": x, "y": pad, "width": head_w, "height": head,
                 "angle": 0, "strokeColor": ink, "backgroundColor": "#f8f9fa", "fillStyle": "solid",
                 "strokeWidth": 2, "roughness": 1, "opacity": 100, "groupIds": [], "frameId": None,
                 "roundness": {"type": 3}, "seed": len(elements) * 7 + 3, "version": 1,
                 "versionNonce": 1, "isDeleted": False,
                 "boundElements": [{"type": "text", "id": tid}]})
-            elements.append(text_el(tid, actor, x + 2, pad + head / 2 - 9, 116, 18, 13,
+            elements.append(text_el(tid, actor, x + 2, pad + head / 2 - 9, head_w - 4, 18, 13,
                                     container=rid))
             elements.append({
-                "type": "line", "id": f"fig-life-{actor}", "x": x + 60, "y": pad + head,
+                "type": "line", "id": f"fig-life-{actor}", "x": x + head_w / 2, "y": pad + head,
                 "width": 0, "height": bottom - pad - head, "angle": 0, "strokeColor": "#adb5bd",
                 "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1,
                 "roughness": 0, "opacity": 100, "groupIds": [], "frameId": None, "roundness": None,
@@ -1043,7 +1056,7 @@ def scene_from_figure(spec: Dict[str, Any], caption: str = "") -> Dict[str, Any]
             src, dst = str(message.get("from") or ""), str(message.get("to") or "")
             if src not in x_of or dst not in x_of or src == dst:
                 continue
-            x1, x2 = x_of[src] + 60, x_of[dst] + 60
+            x1, x2 = x_of[src] + head_w / 2, x_of[dst] + head_w / 2
             elements.append({
                 "type": "arrow", "id": f"fig-msg-{i}", "x": x1, "y": y,
                 "width": abs(x2 - x1), "height": 0, "angle": 0,
