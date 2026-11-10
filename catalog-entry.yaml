@@ -1,6 +1,3 @@
-# Catalog entry for the Hermes plugin catalog. Not submitted yet.
-# Shape verified against hermes_cli/plugin_catalog.py `entry_from_mapping`:
-# sha is a full 40-hex commit, category comes from the fixed shelf list, version is quoted.
 name: coursewright
 repo: https://github.com/NehuenD/hermes_coursewright
 sha: ded7cbdfe1a376fccd60257ecbaed116fbcdf040
