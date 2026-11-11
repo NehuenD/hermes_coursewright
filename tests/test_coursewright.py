@@ -411,7 +411,16 @@ class TestBuild(StoreCase):
 class TestBackgroundBuild(StoreCase):
     """A deep build outlives the tool budget, so it runs off-thread and posts its result."""
 
-    def test_background_returns_at_once_and_posts_when_done(self):
+    def _wait(self, topic):
+        key = cw._topic_key(topic)
+        for _ in range(300):
+            thread = cw._ACTIVE.get(key)
+            if thread is None:
+                break
+            thread.join(timeout=0.05)
+        return key
+
+    def test_background_returns_at_once_and_hands_the_result_to_the_chat(self):
         import threading
 
         gate = threading.Event()
@@ -431,20 +440,44 @@ class TestBackgroundBuild(StoreCase):
                                         "background": True})
         self.assertTrue(started["ok"])
         self.assertTrue(started["background"])
-        self.assertEqual(posted, [])                       # nothing yet: it is still building
+        self.assertEqual(ctx.injected, [])                 # nothing yet: it is still building
         status = cw.course_status(ctx, {})
         self.assertTrue(status["running"], "the running build should be visible in status")
 
         gate.set()
-        key = cw._topic_key("probe topic")
-        for _ in range(200):
-            thread = cw._ACTIVE.get(key)
-            if thread is None:
-                break
-            thread.join(timeout=0.05)
-        self.assertEqual(len(posted), 1, "the finished course must be posted")
-        self.assertIn("Your course is ready", posted[0])
+        key = self._wait("probe topic")
+        # A local session has no transport for post_message: it writes a notification, not a
+        # message, so the result goes to the chat as a turn instead.
+        self.assertEqual(posted, [])
+        self.assertEqual(len(ctx.injected), 1, "the finished course must reach the chat")
+        text, role, _ = ctx.injected[0]
+        self.assertEqual(role, "user")
+        self.assertIn("Your course is ready", text)
+        self.assertIn('::preview{file="', text)
+        self.assertIn("one short line", text)
         self.assertFalse(cw._handoff_pending(key))
+
+    def test_a_refused_handoff_falls_back_to_the_notification(self):
+        ctx = FakeCtx(config={"enable_research": False, "enable_videos": False,
+                              "courses_dir": ""})
+        ctx.inject_message = lambda *a, **k: False
+        posted = []
+        ctx.post_message = lambda text: (posted.append(text), type("H", (), {"ok": True})())[1]
+        cw._spawn_build(ctx, {"topic": "probe two", "max_sections": 2}, "probe-two", "probe two")
+        self._wait("probe two")
+        self.assertEqual(len(posted), 1)
+        self.assertIn("Your course is ready", posted[0])
+
+    def test_a_messaging_surface_still_posts_a_real_message(self):
+        ctx = FakeCtx(config={"enable_research": False, "enable_videos": False,
+                              "courses_dir": ""}, surface="telegram")
+        posted = []
+        ctx.post_message = lambda text: (posted.append(text), type("H", (), {"ok": True})())[1]
+        cw._spawn_build(ctx, {"topic": "probe three", "max_sections": 2}, "probe-three",
+                        "probe three")
+        self._wait("probe three")
+        self.assertEqual(ctx.injected, [], "an adapter can send a message; do not inject")
+        self.assertEqual(len(posted), 1)
 
     def test_a_second_background_build_is_refused(self):
         ctx = FakeCtx(config={"enable_research": False, "enable_videos": False,
@@ -1388,6 +1421,19 @@ class TestParallelDrafting(unittest.TestCase):
         out = cw._draft_all(FakeCtx(config={"draft_concurrency": 4}, llm=llm), _plan(4), "en", 4, "")
         self.assertEqual(len(out), 4)
         self.assertEqual(llm.peak, 1)
+
+    def test_a_refused_model_stops_the_batch_instead_of_hanging(self):
+        class Llm(FakeLlm):
+            async def acomplete_structured(self, **kw):
+                if kw["purpose"] == "coursewright.section.2":
+                    raise PermissionError("plugin not trusted for llm")
+                import asyncio
+                await asyncio.sleep(0.01)
+                number = int(kw["purpose"].rsplit(".", 1)[1])
+                return type("R", (), {"parsed": _section(number - 1), "text": ""})()
+
+        with self.assertRaises(author.ModelUnavailable):
+            cw._draft_all(FakeCtx(config={"draft_concurrency": 3}, llm=Llm()), _plan(4), "en", 4, "")
 
     def test_the_concurrency_setting_is_clamped(self):
         self.assertEqual(cw._draft_concurrency(FakeCtx(config={"draft_concurrency": 99})), 4)

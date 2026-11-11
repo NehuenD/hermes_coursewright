@@ -490,7 +490,14 @@ def _draft_parallel(ctx, plan: dict, language: str, total: int, sources: str,
                 return await author.draft_section_async(ctx, plan, index, language=language,
                                                         sources=sources)
 
-        return list(await asyncio.gather(*(one(index) for index in range(total))))
+        results = await asyncio.gather(*(one(index) for index in range(total)),
+                                       return_exceptions=True)
+        # A refused model has to stop the build the way it does one section at a time, and
+        # the other calls have to be finished (or failed) rather than left running.
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return list(results)
 
     try:
         asyncio.get_running_loop()
@@ -500,6 +507,36 @@ def _draft_parallel(ctx, plan: dict, language: str, total: int, sources: str,
     # loop on a helper thread rather than trying to nest one.
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(lambda: asyncio.run(run())).result()
+
+
+def _hand_to_agent(ctx, message: str, session_key: str, preview_path: str, topic: str) -> bool:
+    """Put the finished course into the conversation as a turn; a notification cannot.
+
+    `post_message` on a local desktop session publishes a sticky notification and writes no
+    message, which is why a build that ended there was reported and never seen. The agent's own
+    reply is an assistant message, and an assistant message is where `::preview` renders the
+    page, so the result is handed over as a turn and the notification stays as the fallback.
+    """
+    if _surface(ctx) not in {"desktop", "cli", "tui", "acp", ""}:
+        return False  # a messaging chat gets a real message from post_message; don't inject
+    instruction = ("Reply with one short line: the course title, how many sections it has, and "
+                   "where the file is.")
+    if preview_path:
+        instruction += (" Then put the preview directive on a line of its own, in the form"
+                        f' ::preview{{file="{preview_path}"}} and outside any code span, so the'
+                        " page opens beside this chat.")
+    else:
+        instruction += " Say what failed and stop there."
+    text = ("[/course] A background build finished. This is the plugin handing you the result,\n"
+            "not a message from the user.\n\n"
+            f"{message.strip()}\n\n"
+            f"{instruction}\n\n"
+            "Call no tools, and do not repeat the rest of this message.")
+    try:
+        return bool(ctx.inject_message(text, role="user", session_key=session_key))
+    except Exception as exc:  # a refusal lands on the notification below
+        logger.warning("coursewright: could not hand %r to the agent: %s", topic, exc)
+        return False
 
 
 def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "") -> dict:
@@ -512,10 +549,12 @@ def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "")
     key = _topic_key(topic) or guard
 
     def _worker() -> None:
+        preview_path = ""
         try:
             result = _build_course(ctx, dict(args))
             if not result.get("ok"):
                 raise RuntimeError(str(result.get("error") or "the build refused"))
+            preview_path = str(result.get("html") or "")
             message = (f"Your course is ready: \"{result['title']}\", "
                        f"{result['sections']} sections, {result['bytes'] // 1024} KB, "
                        f"opens at {result['level']}.\n"
@@ -531,25 +570,24 @@ def _spawn_build(ctx, args: dict, guard: str, topic: str, session_key: str = "")
             with _BUILD_LOCK:
                 _ACTIVE.pop(key, None)
             _release_build(guard)
-        # Post first: it appends the message without pretending to be user input. Under
-        # `plugins.isolation: host` the call is refused outright rather than returning a bad
-        # handle, so the fallback has to cover a raise as well as a refusal.
+        # A local desktop session has no transport of its own: `post_message` publishes a
+        # sticky notification and writes no message, which is why a finished course arrived as
+        # a toast and never in the chat. Only the agent's turn produces an assistant message,
+        # and that message is where `::preview` renders the page beside the chat, so the
+        # handoff is the first attempt and the notification is the fallback.
+        if _hand_to_agent(ctx, message, session_key, preview_path, topic):
+            return
         handle = None
         try:
             handle = ctx.post_message(message)
         except Exception as exc:
-            logger.warning("coursewright: post unavailable (%s) for %r; injecting instead",
-                           exc, topic)
+            logger.warning("coursewright: post unavailable (%s) for %r", exc, topic)
         if handle is not None and getattr(handle, "ok", False):
             logger.info("coursewright: posted build result for %r", topic)
             return
         if handle is not None:
-            logger.warning("coursewright: post refused (%s) for %r; injecting instead",
+            logger.warning("coursewright: post refused (%s) for %r",
                            getattr(handle, "error", "unknown"), topic)
-        try:  # a refused post still has to reach the user somehow
-            ctx.inject_message(message, role="user", session_key=session_key)
-        except Exception as exc:
-            logger.warning("coursewright: inject fallback failed: %s", exc)
 
     # post_message resolves the chat through a contextvar bound by the dispatcher;
     # a bare thread does not inherit it, so carry the context across.
@@ -807,7 +845,11 @@ def _build_course(ctx, args: dict) -> dict:
     # surface has no pane. The visible mirror is the friendlier path for the tab (a stable
     # location outside plugin-data) and re-opening the same URL reuses the tab.
     surface = _surface(ctx)
-    pane_open = _open_in_pane(ctx, Path(mirror) if mirror else html_path, clean["title"])
+    # The pane tool resolves the window of the turn that asked, so a background build has no
+    # window to show it in; there the result is handed to the agent as a turn instead, and that
+    # message carries the `::preview` directive.
+    pane_open = (False if args.get("background")
+                 else _open_in_pane(ctx, Path(mirror) if mirror else html_path, clean["title"]))
 
     # how much explanation each depth actually carries: a thin build should be visible
     # without opening the page
