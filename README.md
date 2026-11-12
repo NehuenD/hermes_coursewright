@@ -52,8 +52,8 @@ nothing, and reads pages with a built-in reader when the host's extractor cannot
 ```
 coursewright_plan(topic="how a transformer works")     plan first, cheap
 coursewright_build(topic="how a transformer works")    plan and write in one call
-coursewright_build(plan_path=".../plans/x.json")       write from a saved plan
-coursewright_build(spec_path=".../course.json")        render an existing spec
+coursewright_build(plan_path="plans/x.json")           write from a saved plan
+coursewright_build(spec_path="courses/<slug>/spec.json")  render an existing spec
 coursewright_list()                                    courses on disk
 coursewright_status()                                  what the host can do, last build
 /course <topic> [--level=novice|intermediate|advanced] [--lang=es] [--sections=N]
@@ -62,6 +62,8 @@ coursewright_status()                                  what the host can do, las
 
 A build writes `$HERMES_HOME/plugin-data/coursewright/courses/<slug>/index.html` and a copy in
 `~/Courses/<slug>/`, with the spec, the research record and any editable figures beside the page.
+Relative `plan_path` and `spec_path` values are inside that directory; absolute paths outside it
+are refused, including symlinks that leave it.
 
 `/course` returns at once and hands the build to the agent as a turn, so progress is visible and
 the finished course arrives in the conversation. If no live session can be woken, it falls back
@@ -88,7 +90,7 @@ and the posters, labels each level, and re-colours the figures as line art.
 | rung | uses | when it is missing |
 |---|---|---|
 | find | host `web_search` | keyless finders: Wikipedia, arXiv, Stack Exchange |
-| read | host `web_extract` | a configured scraper, then a built-in `urllib` reader |
+| read | host `web_extract` | a configured scraper, then the guarded built-in reader |
 | watch | `yt-dlp` | the watch list is empty and the build says why |
 | model | `ctx.llm` | the build fails with the reason rather than writing a stub |
 
@@ -132,7 +134,7 @@ move a box and keep the result.
 | `max_videos` | `6` | videos collected per course |
 | `draft_concurrency` | `3` | sections written at once, 1 to 4; 1 is one at a time |
 | `research_timeout` | `150` | seconds spent searching and reading before it writes anyway |
-| `firecrawl_url` | `""` | scraper used when the host extractor returns nothing: empty probes a local stack on `http://localhost:3002`, `off` disables it, a full URL points anywhere |
+| `firecrawl_url` | `""` | opt-in scraper used when the host extractor returns nothing; empty or `off` disables it, a full URL points anywhere (including a local `http://localhost:3002` stack) |
 | `firecrawl_key` | `""` | bearer token for that scraper, kept as a Hermes secret (`.env` name `FIRECRAWL_API_KEY`) and read through the secret scope |
 
 **Debugging a build.** `COURSEWRIGHT_DUMP=<dir>` writes each section's raw model reply, and the
@@ -148,11 +150,17 @@ The whole list, because a plugin that reads the web and runs a tool should say s
   HTTP (Wikipedia, arXiv and Stack Exchange directly when no backend answers). `yt-dlp` is
   queried for video metadata, and thumbnails are downloaded and inlined into the page as WebP so
   a course has no external image requests. If you configure a scraper (`firecrawl_url`), pages
-  are sent to it.
+  are sent to it. Coursewright's stdlib-only guard makes its built-in reader refuse private,
+  loopback and link-local targets and re-check every redirect hop. It also checks a URL before
+  handing it to a configured scraper; remote redirects inside that service are its own policy.
+  A configured local scraper is not itself blocked.
 - **Reads.** Only the pages research found, plus its own files. It does not read your home
-  directory, other plugins' data, `.env`, `auth.json` or any credential store.
+  directory, other plugins' data, `.env`, `auth.json` or any credential store. The `plan_path`
+  and `spec_path` arguments are confined to the plugin's own store before the file is opened.
 - **Shell.** One child process: `yt-dlp`, invoked with an argument vector (never a shell), only
-  while collecting a watch list, and skipped entirely when `enable_videos` is false.
+  while collecting a watch list, and skipped entirely when `enable_videos` is false. The child
+  gets an explicit minimal environment (PATH, HOME, locale variables), not the provider keys
+  and tokens inherited by a normal subprocess.
 - **Writes.** Its own directory under `$HERMES_HOME/plugin-data/coursewright/`, and one copy of
   the finished page under `courses_dir` (`~/Courses` by default — point it elsewhere, or set it
   empty to disable the copy). `COURSEWRIGHT_DUMP` is the only other destination, and only when

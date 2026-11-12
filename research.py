@@ -4,7 +4,8 @@ The ladder is probed, never assumed:
 
     find   web_search        (whatever web backend the user configured)
     read   web_extract       (same backend, markdown)
-    rescue Firecrawl         (only if it answers a live probe and extraction came up short)
+    rescue Firecrawl         (opt-in URL, live probe, extraction came up short)
+    rescue guarded direct    (stdlib, per-hop URL/address policy, no core import)
     watch  yt-dlp + youtube_transcript_api  (keyless; transcripts decide quotability)
 
 Every rung that fails is recorded, not papered over. Nothing here invents a source: a
@@ -27,12 +28,17 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Set
 
+try:  # loaded as a package by the plugin loader
+    from . import netguard
+except ImportError:  # direct import during development
+    import netguard  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 7 * 24 * 3600
-# A local `firecrawl` compose stack is the friendliest default, but it is a default: the setting
-# `firecrawl_url` replaces it, and an empty value or "off" means never probe it at all.
-_FIRECRAWL_DEFAULT = "http://localhost:3002"
+# The scraper is opt-in by explicit URL: an empty setting never knocks on a port on the user's
+# machine. A self-hosted stack is configured by name (e.g. http://localhost:3002).
+_FIRECRAWL_DEFAULT = ""
 _READ_MAX_BYTES = 400_000
 _THUMB_MAX_BYTES = 60_000
 _THUMB_TOTAL_BYTES = 2_000_000
@@ -55,6 +61,9 @@ _ARXIV_SEARCH = "https://export.arxiv.org/api/query"
 
 
 def _http_text(url: str, timeout: float = 14.0) -> str:
+    # Hosts here are fixed above (_WIKI_SEARCH / _STACK_SEARCH / _ARXIV_SEARCH), not
+    # attacker-influenced, so a private-address guard adds nothing. Untrusted targets go
+    # through netguard in stdlib_read and _firecrawl_scrape.
     import urllib.request
 
     request = urllib.request.Request(url, headers={"User-Agent": _UA})
@@ -332,9 +341,9 @@ def probe_web(ctx) -> bool:
 def firecrawl_target(caps: Optional[Dict[str, Any]]) -> tuple:
     """``(base_url, api_key)`` from settings; ``("", "")`` means "do not use a scraper".
 
-    Empty setting keeps the local-stack default so an install that already runs firecrawl on
-    this machine needs no configuration; ``off``/``none``/``no``/``false`` turns it off, and a
-    full URL points at a self-hosted stack somewhere else or at the cloud API.
+    Empty is off; a full URL opts in to a self-hosted stack or a cloud API.
+    ``off``/``none``/``no``/``false`` are recognised aliases for off, so a local Compose stack
+    must now be named explicitly instead of being probed behind the user's back.
     """
     caps = caps or {}
     raw = str(caps.get("firecrawl_url") or "").strip()
@@ -363,6 +372,12 @@ def probe_firecrawl(base: str = "", key: str = "", timeout: float = 2.5) -> bool
 def _firecrawl_scrape(url: str, base: str = "", key: str = "", timeout: float = 25.0) -> str:
     if not base:
         return ""
+    # Guard the URL handed to the scraper, not the scraper's own endpoint: a self-hosted stack
+    # of the user's own sits at a private address by design. The remote service follows its own
+    # redirects, which is out of our reach; only the target we choose can be checked here.
+    if not netguard.is_safe_url(url):
+        logger.info("coursewright research: unsafe URL not sent to scraper: %s", _domain(url))
+        return ""
     try:
         import httpx
 
@@ -384,27 +399,26 @@ _DROP_TAG = re.compile(
 
 
 def stdlib_read(url: str, timeout: float = 12.0) -> str:
-    """Last rung of the reader ladder: urllib, no dependency, no key.
+    """Last rung of the reader ladder, guarded by the plugin's own outbound URL policy.
 
     It exists for the hosts the other two rungs miss — a proxy that passes HTML but blocks a
-    scraping API, a cloud scraper with no key configured, a network where the plugin's own
-    HTTP client cannot be installed. Rougher text than a real extractor, but a course with a
-    rough excerpt beats a course with no source at all.
+    scraping API, a cloud scraper with no key configured. Rougher text than a real extractor,
+    but a course with a rough excerpt beats a course with no source at all. The target came out
+    of a search result: netguard checks scheme and resolved addresses, and re-checks every
+    redirect hop before dialling the address it validated. Nothing here falls back to unguarded
+    urllib. See ``netguard.py`` for the exact policy, in stdlib only (a public plugin surface).
     """
     try:
-        import urllib.request
-
-        request = urllib.request.Request(
-            url, headers={"User-Agent": _UA,
-                          "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if response.status >= 400:
-                return ""
-            kind = str(response.headers.get_content_type() or "")
-            if kind and not (kind.startswith("text/") or "xhtml" in kind or "xml" in kind):
-                return ""                      # a PDF or an image is not an excerpt
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw = response.read(_READ_MAX_BYTES)
+        headers = {"User-Agent": _UA,
+                   "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"}
+        status, response_headers, raw = netguard.fetch(url, timeout=timeout, headers=headers,
+                                                       max_bytes=_READ_MAX_BYTES)
+        if status >= 400:
+            return ""
+        kind = str(response_headers.get_content_type() or "")
+        if kind and not (kind.startswith("text/") or "xhtml" in kind or "xml" in kind):
+            return ""                          # a PDF or an image is not an excerpt
+        charset = response_headers.get_content_charset() or "utf-8"
     except Exception:
         return ""
     try:
@@ -431,6 +445,20 @@ def probe_videos() -> bool:
     return bool(shutil.which("yt-dlp"))
 
 
+# A child process must not inherit the parent's provider keys and tokens. yt-dlp is a
+# third-party binary that loads third-party extractor code and makes network requests; a
+# YouTube search needs PATH, a home for ~/.config/yt-dlp, and locale settings, nothing
+# else. Windows needs the listed USERPROFILE/TEMP/TMP/SYSTEMROOT family. Deliberately no
+# proxy variables here: they can carry proxy credentials, so they stay out of the child.
+_CHILD_ENV_KEYS = ("PATH", "HOME", "USERPROFILE", "TEMP", "TMP", "SYSTEMROOT",
+                   "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+
+
+def _child_env() -> dict:
+    """Minimal environment for an external tool; do not add a "convenient" key to this."""
+    return {key: os.environ[key] for key in _CHILD_ENV_KEYS if os.environ.get(key)}
+
+
 def _yt_search(topic: str, limit: int, queries: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     if not shutil.which("yt-dlp"):
         return []
@@ -442,7 +470,8 @@ def _yt_search(topic: str, limit: int, queries: Optional[List[str]] = None) -> L
                "--print", "%(id)s\t%(duration)s\t%(channel)s\t%(title)s",
                f"ytsearch{wanted_count}:{query}"]
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=45).stdout
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=45,
+                                 env=_child_env()).stdout
         except Exception as exc:
             logger.info("coursewright research: yt-dlp failed for %r (%s)", query, exc)
             continue
@@ -479,6 +508,7 @@ def _thumb(video_id: str) -> str:
         import httpx
         from PIL import Image
 
+        # Fixed CDN host; video_id is a YouTube id, not an attacker-chosen host, so no guard.
         url = f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
         with httpx.Client(timeout=8.0, follow_redirects=True) as client:
             resp = client.get(url)
@@ -614,9 +644,9 @@ def gather(ctx, *, topic: str, language: str = "en", caps: Optional[Dict[str, An
             text = _firecrawl_scrape(candidate["url"], fc_base, fc_key)
             reader = "firecrawl"
         if len(text.strip()) < 200:
-            # rescue 2: urllib, which needs nothing installed and nothing configured
+            # rescue 2: the guarded last rung; refuses private targets and redirect escapes
             text = stdlib_read(candidate["url"])
-            reader = "urllib"
+            reader = "guarded http"
         excerpt = _digest(text, 800)
         if len(excerpt) < 160:
             record["failures"].append(f"could not read {_domain(candidate['url']) or candidate['url']}")
@@ -691,7 +721,7 @@ def describe(ctx=None, caps: Optional[Dict[str, Any]] = None, *, probe_search: b
     fc_base, fc_key = firecrawl_target(caps)
     search_ok = probe_web(ctx) if (ctx is not None and probe_search) else None
 
-    readers = ["urllib"]                       # always available: stdlib, no dependency
+    readers = ["guarded http"]                 # no key or search backend required; stdlib guard
     if search_ok is not False:
         readers.insert(0, "web_extract")
     if fc_base and probe_firecrawl(fc_base, fc_key):

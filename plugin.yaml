@@ -1,5 +1,5 @@
 name: coursewright
-version: 0.5.1
+version: 0.6.0
 manifest_version: 2
 requires_hermes: ">=0.23"   # ctx.inject_message, ctx.state, manifest v2
 license: MIT
@@ -71,9 +71,10 @@ config_schema:
     default: ""
     label: Scraper URL (Firecrawl)
     description: >-
-      A Firecrawl instance used as a second reader when the host's own extractor returns
-      nothing. Empty probes a local stack on http://localhost:3002; "off" disables it; a full
-      URL points at a self-hosted instance or at https://api.firecrawl.dev with the key below.
+      Opt-in Firecrawl instance used as a second reader when the host's own extractor returns
+      nothing. Empty disables it; a full URL points at a self-hosted instance (including a
+      local stack such as http://localhost:3002) or https://api.firecrawl.dev with the key
+      below. The scraper is never probed implicitly.
   firecrawl_key:
     type: secret
     default: ""

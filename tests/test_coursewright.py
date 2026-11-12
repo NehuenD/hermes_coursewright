@@ -1211,12 +1211,12 @@ class TestReaderLadder(unittest.TestCase):
         finally:
             research.stdlib_read, research._keyless_find = real_stdlib, real_keyless
         self.assertEqual(found["sources"][0]["url"], "https://example.com/a")
-        self.assertIn("urllib", found["readers"])
+        self.assertIn("guarded http", found["readers"])
 
 
 class TestFirecrawlConfig(unittest.TestCase):
-    def test_empty_keeps_the_local_default(self):
-        self.assertEqual(research.firecrawl_target({}), ("http://localhost:3002", ""))
+    def test_empty_means_off(self):
+        self.assertEqual(research.firecrawl_target({}), ("", ""))
 
     def test_off_disables_it(self):
         for value in ("off", "OFF", "none", "false", "-"):
@@ -1239,16 +1239,16 @@ class TestFirecrawlConfig(unittest.TestCase):
             del os.environ["FIRECRAWL_API_KEY"]
         self.assertEqual(caps["firecrawl_key"], "from-env")
 
-    def test_caps_default_to_this_machines_local_stack(self):
+    def test_caps_do_not_invent_a_local_scraper(self):
         caps = cw._caps(FakeCtx(config={}))
         self.assertEqual(caps["firecrawl_url"], "")
-        self.assertEqual(research.firecrawl_target(caps)[0], "http://localhost:3002")
+        self.assertEqual(research.firecrawl_target(caps), ("", ""))
 
 
 class TestEnvironmentReport(unittest.TestCase):
     def test_describe_reports_readers_and_gaps(self):
         report = research.describe(None, {"firecrawl_url": "off"}, probe_search=False)
-        self.assertIn("urllib", report["readers"])
+        self.assertIn("guarded http", report["readers"])
         self.assertFalse(report["firecrawl"]["configured"])
         self.assertIn("yt-dlp", report["videos"]["detail"])
         self.assertIsNone(report["search"]["ok"])

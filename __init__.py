@@ -127,8 +127,8 @@ BUILD_SCHEMA = {
         "type": "object",
         "properties": {
             "topic": {"type": "string", "description": "Subject to build (when no plan_path/spec_path)."},
-            "plan_path": {"type": "string", "description": "A plan JSON written by coursewright_plan."},
-            "spec_path": {"type": "string", "description": "A complete course spec JSON to render as-is."},
+            "plan_path": {"type": "string", "description": "A plan JSON written by coursewright_plan, inside the plugin data directory (plans/<slug>.json)."},
+            "spec_path": {"type": "string", "description": "A complete course spec JSON to render as-is, inside the plugin data directory (courses/<slug>/spec.json)."},
             "level": {"type": "string", "enum": ["novice", "intermediate", "advanced"]},
             "language": {"type": "string"},
             "max_sections": {"type": "integer",
@@ -155,6 +155,32 @@ def _slug(text: str) -> str:
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _confined_json(raw: str, what: str):
+    """Read a plan/spec only from inside the plugin's own data directory.
+
+    These values are tool arguments, so they can be steered by injected text toward a secrets
+    file. ``resolve()`` also collapses ``..`` and lands a symlink on its real target; the
+    refusal happens before any file is opened. Relative paths are interpreted *inside* the
+    store, and a relative spec/plan written by the plugin keeps working. Returns ``(doc, error)``.
+    """
+    root = _store().resolve()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    path = path.resolve()
+    if path != root and root not in path.parents:
+        return None, f"{what} must be a JSON file inside {root}; refusing {raw}"
+    if not path.is_file() or path.suffix.lower() != ".json":
+        return None, f"{what} is not an existing JSON file in {root}: {raw}"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return None, f"{what} is not readable JSON: {exc}"
+    if not isinstance(doc, dict):
+        return None, f"{what} must contain a JSON object"
+    return doc, ""
 
 
 def _write(path: Path, text: str) -> None:
@@ -708,14 +734,18 @@ def _build_course(ctx, args: dict) -> dict:
     sections: list = []
 
     if spec_path:                                     # 1. a finished spec
-        raw = _read_json(Path(spec_path).expanduser())
+        raw, path_error = _confined_json(spec_path, "spec_path")
+        if raw is None:
+            return {"ok": False, "error": path_error or "spec_path is not a JSON object"}
         origin = spec_path
     elif not plan_path and (_SAMPLES / f"{_slug(topic)}.json").exists():
         raw = _read_json(_SAMPLES / f"{_slug(topic)}.json")   # 2. a bundled sample
         origin = f"sample:{_slug(topic)}"
     else:                                             # 3. plan -> research -> draft
         if plan_path:
-            plan = _read_json(Path(plan_path).expanduser())
+            plan, path_error = _confined_json(plan_path, "plan_path")
+            if plan is None:
+                return {"ok": False, "error": path_error or "plan_path is not a JSON object"}
         else:
             # The same section count has to reach the planner, or the plan describes eight
             # sections and the course renders two of them.
